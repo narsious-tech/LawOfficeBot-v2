@@ -167,7 +167,13 @@ def get_nearest_allowed_office(cur, latitude, longitude, action):
             ORDER BY id ASC
         """)
     offices = cur.fetchall()
+    print("\n===== OFFICES FROM DATABASE =====")
 
+    for office in offices:
+        print(office)
+
+    print("===============================\n")
+    
     if not offices:
         raise Exception(
             "No active attendance office is configured "
@@ -201,7 +207,9 @@ def get_nearest_allowed_office(cur, latitude, longitude, action):
             nearest = candidate
 
     return nearest
-
+    print("\n===== NEAREST OFFICE =====")
+    print(nearest)
+    print("==========================\n")
 
 def get_attendance_session(cur, telegram_user_id, attendance_date):
     cur.execute("""
