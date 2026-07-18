@@ -242,6 +242,8 @@ def register_handlers(
         ("attendance", "attendance"),
         ("approveattendance", "approve_attendance"),
         ("linkstaff", "linkstaff"),
+        ("linkedstaff", "linkedstaff"),
+        ("delinkstaff", "delinkstaff"),
         ("checkin", "checkin"),
         ("checkout", "checkout"),
         ("testweb", "test_web"),

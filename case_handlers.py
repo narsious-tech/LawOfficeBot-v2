@@ -1,28 +1,53 @@
 """
-Modular case-handler registration for LawOfficeBot-v2.
+Core modular handler registration for LawOfficeBot-v2.
 
-Register this before the legacy handlers. Because python-telegram-bot uses the
-first matching handler in a handler group, these modular handlers take
-precedence while the legacy code remains available as a rollback.
+Case creation is intentionally performed only in Advocate Diaries. New cases
+are imported automatically through the existing Advocate Diaries sync.
 """
 
-from telegram.ext import Application, CommandHandler
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 from commands.find_case import findcase
-from commands.new_case import (
-    build_new_case_conversation_handler,
-    start,
-)
+
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    await update.effective_message.reply_text(
+        "Law Office Bot Live\n\n"
+        "New cases must be added in Advocate Diaries and will be "
+        "automatically synced here.\n\n"
+        "Useful commands:\n"
+        "/findcase CASE_ID\n"
+        "/attendance\n"
+        "/works\n"
+        "/commands"
+    )
+
+
+async def newcase_disabled(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    await update.effective_message.reply_text(
+        "ℹ️ New-case entry is disabled in Telegram.\n\n"
+        "Please add the case in Advocate Diaries. The scheduled sync will "
+        "automatically import it into the Law Office Bot."
+    )
 
 
 def register_case_handlers(application: Application) -> None:
-    """Register modular start, new-case, and find-case handlers."""
+    """
+    Register these handlers before the legacy handlers so they take precedence.
+    """
     application.add_handler(
-        build_new_case_conversation_handler(),
+        CommandHandler("start", start),
         group=0,
     )
     application.add_handler(
-        CommandHandler("start", start),
+        CommandHandler("newcase", newcase_disabled),
         group=0,
     )
     application.add_handler(
