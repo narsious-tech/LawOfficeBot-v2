@@ -1,1 +1,1 @@
-
+"""LawOfficeBot service modules."""
