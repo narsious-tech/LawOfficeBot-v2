@@ -24,6 +24,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
 
 
 async def monitor_attendance_job(context):
@@ -140,6 +141,218 @@ async def linkstaff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.effective_message.reply_text(
         f"✅ Staff account linked for {staff_name}"
+    )
+
+
+def _admin_identifiers():
+    """Return configured Telegram administrator identifiers as strings."""
+    return {
+        str(value).strip()
+        for value in (ADMIN_USER_ID, ADMIN_CHAT_ID)
+        if value is not None and str(value).strip()
+    }
+
+
+def _is_staff_admin(update: Update) -> bool:
+    """
+    Permit staff-management commands only for the configured administrator.
+
+    ADMIN_USER_ID is preferred. ADMIN_CHAT_ID is also accepted for compatibility
+    with the existing Railway environment.
+    """
+    allowed = _admin_identifiers()
+
+    user_id = str(update.effective_user.id) if update.effective_user else ""
+    chat_id = str(update.effective_chat.id) if update.effective_chat else ""
+
+    return bool(allowed) and (
+        user_id in allowed
+        or chat_id in allowed
+    )
+
+
+async def linkedstaff(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    """List staff accounts currently linked to Telegram."""
+    if not _is_staff_admin(update):
+        await update.effective_message.reply_text(
+            "❌ This command is restricted to the administrator."
+        )
+        return
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            SELECT
+                telegram_user_id,
+                staff_name,
+                ad_email,
+                is_active
+            FROM staff_accounts
+            WHERE telegram_user_id IS NOT NULL
+            ORDER BY
+                is_active DESC,
+                LOWER(staff_name)
+        """)
+
+        rows = cur.fetchall()
+
+    finally:
+        cur.close()
+        conn.close()
+
+    if not rows:
+        await update.effective_message.reply_text(
+            "No Telegram-linked staff accounts were found."
+        )
+        return
+
+    lines = ["👥 LINKED STAFF ACCOUNTS", ""]
+
+    for index, (
+        telegram_user_id,
+        staff_name,
+        ad_email,
+        is_active,
+    ) in enumerate(rows, start=1):
+        status = "Active" if is_active else "Inactive"
+
+        lines.extend([
+            f"{index}. {staff_name}",
+            f"   Telegram ID: {telegram_user_id}",
+            f"   Email: {ad_email or '-'}",
+            f"   Status: {status}",
+            "",
+        ])
+
+    lines.extend([
+        "To de-link an account:",
+        "/delinkstaff TELEGRAM_USER_ID",
+        "",
+        "You may also use the exact email or exact staff name.",
+    ])
+
+    message = "\n".join(lines)
+
+    for start in range(0, len(message), 3900):
+        await update.effective_message.reply_text(
+            message[start:start + 3900]
+        )
+
+
+async def delinkstaff(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    De-link one staff account from Telegram.
+
+    Accepted target:
+      - Telegram user ID
+      - Exact Advocate Diaries email
+      - Exact staff name
+    """
+    if not _is_staff_admin(update):
+        await update.effective_message.reply_text(
+            "❌ This command is restricted to the administrator."
+        )
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Usage:\n"
+            "/delinkstaff TELEGRAM_USER_ID\n\n"
+            "You may also use an exact email or exact staff name.\n"
+            "Run /linkedstaff to see linked accounts."
+        )
+        return
+
+    target = " ".join(context.args).strip()
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+
+    try:
+        if target.lstrip("-").isdigit():
+            cur.execute("""
+                SELECT
+                    telegram_user_id,
+                    staff_name,
+                    ad_email
+                FROM staff_accounts
+                WHERE telegram_user_id = %s
+            """, (int(target),))
+
+        elif "@" in target:
+            cur.execute("""
+                SELECT
+                    telegram_user_id,
+                    staff_name,
+                    ad_email
+                FROM staff_accounts
+                WHERE LOWER(ad_email) = LOWER(%s)
+                  AND telegram_user_id IS NOT NULL
+            """, (target,))
+
+        else:
+            cur.execute("""
+                SELECT
+                    telegram_user_id,
+                    staff_name,
+                    ad_email
+                FROM staff_accounts
+                WHERE LOWER(staff_name) = LOWER(%s)
+                  AND telegram_user_id IS NOT NULL
+            """, (target,))
+
+        matches = cur.fetchall()
+
+        if not matches:
+            await update.effective_message.reply_text(
+                "❌ No linked staff account matched that value.\n"
+                "Run /linkedstaff and use the displayed Telegram ID."
+            )
+            return
+
+        if len(matches) > 1:
+            ids = ", ".join(str(row[0]) for row in matches)
+
+            await update.effective_message.reply_text(
+                "❌ More than one staff account matched that name.\n"
+                f"Use one of these Telegram IDs: {ids}"
+            )
+            return
+
+        telegram_user_id, staff_name, ad_email = matches[0]
+
+        cur.execute("""
+            UPDATE staff_accounts
+            SET
+                telegram_user_id = NULL,
+                is_active = FALSE
+            WHERE telegram_user_id = %s
+        """, (telegram_user_id,))
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        cur.close()
+        conn.close()
+
+    await update.effective_message.reply_text(
+        "✅ Staff account de-linked.\n\n"
+        f"Staff: {staff_name}\n"
+        f"Email: {ad_email or '-'}\n"
+        f"Former Telegram ID: {telegram_user_id}\n\n"
+        "The staff member can be linked again later using /linkstaff."
     )
 
 def save_attendance_location(
