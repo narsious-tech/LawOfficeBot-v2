@@ -848,7 +848,7 @@ def build_existing_cases_summary(
         "all your matters on this WhatsApp number."
     )
 
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 
