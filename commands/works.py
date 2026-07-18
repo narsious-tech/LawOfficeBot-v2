@@ -5,6 +5,10 @@ import psycopg2
 from datetime import datetime
 from config import DATABASE_URL
 from advocate_web import AdvocateWeb
+from services.activity_logger import (
+    log_activity,
+    log_activity_with_cursor,
+)
 
 web = AdvocateWeb()
 
@@ -211,6 +215,25 @@ async def completework(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = web.complete_work(work_id)
 
     if response.status_code == 200:
+        log_activity(
+            case_value=item.get("case_number", ""),
+            event_code="AD_WORK_COMPLETED",
+            details=(
+                f"Work: {item.get('work_description') or '-'}\n"
+                f"Advocate Diaries Work ID: {work_id}"
+            ),
+            source_module="ADVOCATE_DIARIES_WORK",
+            source_id=str(work_id),
+            user_id=update.effective_user.id,
+            metadata={
+                "work_id": str(work_id),
+                "work_description": item.get(
+                    "work_description",
+                    ""
+                ),
+            }
+        )
+
         await update.effective_message.reply_text(
             f"✅ Work #{number} marked as completed.\n\n{item['details']}"
         )
@@ -352,7 +375,38 @@ async def assignwork(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 item.get("case_title", "")
             ))
             task_id = cur.fetchone()[0]
-            conn.commit()
+
+            log_activity_with_cursor(
+                cur,
+                case_value=item.get(
+                    "case_number",
+                    ""
+                ),
+                event_code="AD_WORK_ASSIGNED",
+                details=(
+                    f"Task #{task_id}\n"
+                    f"Assigned to: {staff_name}\n"
+                    f"Work: "
+                    f"{item.get('work_description') or '-'}\n"
+                    f"Next Hearing: "
+                    f"{item.get('next_hearing') or '-'}"
+                ),
+                source_module="TASK",
+                source_id=str(task_id),
+                user_id=update.effective_user.id,
+                metadata={
+                    "task_id": task_id,
+                    "work_id": (
+                        str(work_id)
+                        if work_id is not None
+                        else None
+                    ),
+                    "assigned_to": staff_name,
+                    "source_type": (
+                        "advocate_diaries_work"
+                    ),
+                }
+            )
 
             assigned_items.append({
                 "task_id": task_id,

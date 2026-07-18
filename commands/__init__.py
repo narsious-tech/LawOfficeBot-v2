@@ -1,1 +1,1 @@
-"""Telegram command modules."""
+"""Telegram command modules for LawOfficeBot-v2."""

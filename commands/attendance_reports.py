@@ -135,6 +135,7 @@ def calculate_early_minutes(checkout_time):
     )
 
 
+
 async def send_long_message(
     update: Update,
     message: str
@@ -166,7 +167,331 @@ async def send_long_message(
             chunk
         )
 
+async def sync_today_attendance_sessions(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    today = now_ist().date()
 
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            WITH location_events AS (
+                SELECT
+                    al.telegram_user_id,
+                    al.staff_name,
+                    al.action,
+
+                    (
+                        al.created_at
+                        AT TIME ZONE 'UTC'
+                        AT TIME ZONE 'Asia/Kolkata'
+                    ) AS local_created_at,
+
+                    COALESCE(
+                        al.office_id,
+                        nearest_office.office_id
+                    ) AS resolved_office_id,
+
+                    COALESCE(
+                        al.office_name,
+                        nearest_office.office_name
+                    ) AS resolved_office_name
+
+                FROM attendance_locations al
+
+                LEFT JOIN LATERAL (
+                    SELECT
+                        ao.id AS office_id,
+                        ao.office_name
+
+                    FROM attendance_offices ao
+
+                    WHERE ao.is_active = TRUE
+
+                    ORDER BY (
+                        6371000 * 2 * ASIN(
+                            SQRT(
+                                POWER(
+                                    SIN(
+                                        RADIANS(
+                                            ao.latitude
+                                            - CAST(
+                                                al.latitude
+                                                AS DOUBLE PRECISION
+                                            )
+                                        ) / 2
+                                    ),
+                                    2
+                                )
+                                +
+                                COS(
+                                    RADIANS(
+                                        CAST(
+                                            al.latitude
+                                            AS DOUBLE PRECISION
+                                        )
+                                    )
+                                )
+                                *
+                                COS(
+                                    RADIANS(
+                                        ao.latitude
+                                    )
+                                )
+                                *
+                                POWER(
+                                    SIN(
+                                        RADIANS(
+                                            ao.longitude
+                                            - CAST(
+                                                al.longitude
+                                                AS DOUBLE PRECISION
+                                            )
+                                        ) / 2
+                                    ),
+                                    2
+                                )
+                            )
+                        )
+                    ) ASC
+
+                    LIMIT 1
+                ) nearest_office
+                    ON TRUE
+
+                WHERE (
+                    al.created_at
+                    AT TIME ZONE 'UTC'
+                    AT TIME ZONE 'Asia/Kolkata'
+                )::date = %s
+            )
+
+            SELECT
+                telegram_user_id,
+                MAX(staff_name) AS staff_name,
+
+                MIN(local_created_at) FILTER (
+                    WHERE action = 'CHECKIN'
+                ) AS checkin_time,
+
+                (
+                    ARRAY_AGG(
+                        resolved_office_id
+                        ORDER BY local_created_at ASC
+                    ) FILTER (
+                        WHERE action = 'CHECKIN'
+                    )
+                )[1] AS checkin_office_id,
+
+                (
+                    ARRAY_AGG(
+                        resolved_office_name
+                        ORDER BY local_created_at ASC
+                    ) FILTER (
+                        WHERE action = 'CHECKIN'
+                    )
+                )[1] AS checkin_office_name,
+
+                MAX(local_created_at) FILTER (
+                    WHERE action = 'CHECKOUT'
+                ) AS checkout_time,
+
+                (
+                    ARRAY_AGG(
+                        resolved_office_id
+                        ORDER BY local_created_at DESC
+                    ) FILTER (
+                        WHERE action = 'CHECKOUT'
+                    )
+                )[1] AS checkout_office_id,
+
+                (
+                    ARRAY_AGG(
+                        resolved_office_name
+                        ORDER BY local_created_at DESC
+                    ) FILTER (
+                        WHERE action = 'CHECKOUT'
+                    )
+                )[1] AS checkout_office_name
+
+            FROM location_events
+
+            GROUP BY telegram_user_id
+
+            ORDER BY staff_name
+        """, (
+            today,
+        ))
+
+        rows = cur.fetchall()
+
+        synced = 0
+        skipped = 0
+
+        for (
+            telegram_user_id,
+            staff_name,
+            checkin_time,
+            checkin_office_id,
+            checkin_office_name,
+            checkout_time,
+            checkout_office_id,
+            checkout_office_name
+        ) in rows:
+
+            if not checkin_time:
+                skipped += 1
+                continue
+
+            if checkout_time:
+                working_minutes = max(
+                    0,
+                    int(
+                        (
+                            checkout_time
+                            - checkin_time
+                        ).total_seconds()
+                        // 60
+                    )
+                )
+
+                status = "CLOSED"
+
+            else:
+                working_minutes = None
+                status = "OPEN"
+
+            cur.execute("""
+                INSERT INTO attendance_sessions
+                (
+                    telegram_user_id,
+                    staff_name,
+                    attendance_date,
+
+                    checkin_time,
+                    checkin_office_id,
+                    checkin_office_name,
+
+                    checkout_time,
+                    checkout_office_id,
+                    checkout_office_name,
+
+                    status,
+                    working_minutes,
+
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s,
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP
+                )
+
+                ON CONFLICT (
+                    telegram_user_id,
+                    attendance_date
+                )
+
+                DO UPDATE SET
+                    staff_name = EXCLUDED.staff_name,
+
+                    checkin_time =
+                        EXCLUDED.checkin_time,
+
+                    checkin_office_id =
+                        COALESCE(
+                            EXCLUDED.checkin_office_id,
+                            attendance_sessions.checkin_office_id
+                        ),
+
+                    checkin_office_name =
+                        COALESCE(
+                            EXCLUDED.checkin_office_name,
+                            attendance_sessions.checkin_office_name
+                        ),
+
+                    checkout_time =
+                        COALESCE(
+                            EXCLUDED.checkout_time,
+                            attendance_sessions.checkout_time
+                        ),
+
+                    checkout_office_id =
+                        COALESCE(
+                            EXCLUDED.checkout_office_id,
+                            attendance_sessions.checkout_office_id
+                        ),
+
+                    checkout_office_name =
+                        COALESCE(
+                            EXCLUDED.checkout_office_name,
+                            attendance_sessions.checkout_office_name
+                        ),
+
+                    status = CASE
+                        WHEN EXCLUDED.checkout_time
+                             IS NOT NULL
+                        THEN 'CLOSED'
+                        ELSE 'OPEN'
+                    END,
+
+                    working_minutes =
+                        COALESCE(
+                            EXCLUDED.working_minutes,
+                            attendance_sessions.working_minutes
+                        ),
+
+                    updated_at =
+                        CURRENT_TIMESTAMP
+            """, (
+                telegram_user_id,
+                staff_name,
+                today,
+
+                checkin_time,
+                checkin_office_id,
+                checkin_office_name,
+
+                checkout_time,
+                checkout_office_id,
+                checkout_office_name,
+
+                status,
+                working_minutes
+            ))
+
+            synced += 1
+
+        conn.commit()
+
+    except Exception as exc:
+        conn.rollback()
+
+        await update.effective_message.reply_text(
+            "❌ Attendance session sync failed:\n"
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    finally:
+        cur.close()
+        conn.close()
+
+    await update.effective_message.reply_text(
+        "✅ TODAY'S ATTENDANCE SESSIONS SYNCED\n\n"
+        f"📅 Date: "
+        f"{today.strftime('%d-%m-%Y')}\n"
+        f"✅ Synced: {synced}\n"
+        f"⏭ Skipped: {skipped}\n\n"
+        "Run /attendancetoday to verify."
+    )    
 async def whoinoffice(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -324,11 +649,15 @@ async def attendancetoday(
         rows = cur.fetchall()
 
         cur.execute("""
-            SELECT
+            SELECT DISTINCT ON (
+                LOWER(TRIM(staff_name))
+            )
                 staff_name
             FROM staff_accounts
             WHERE is_active = TRUE
-            ORDER BY staff_name ASC
+            ORDER BY
+                LOWER(TRIM(staff_name)),
+                staff_name
         """)
 
         all_staff = [

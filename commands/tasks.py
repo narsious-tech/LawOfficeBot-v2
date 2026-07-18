@@ -6,6 +6,9 @@ from telegram.ext import ContextTypes
 import psycopg2
 
 from config import DATABASE_URL
+from services.activity_logger import (
+    log_activity_with_cursor,
+)
 
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
 PRIORITY_ICONS = {
@@ -1243,6 +1246,28 @@ async def reassign_task(
             reason or None
         ))
 
+        log_activity_with_cursor(
+            cur,
+            case_value=case_number or "",
+            event_code="TASK_REASSIGNED",
+            details=(
+                f"Task #{db_task_id}\n"
+                f"From: {old_staff_name or '-'}\n"
+                f"To: {new_staff_name}\n"
+                f"Reason: {reason or '-'}\n"
+                f"Task: {task_text or '-'}"
+            ),
+            source_module="TASK",
+            source_id=str(db_task_id),
+            user_id=telegram_user_id,
+            metadata={
+                "task_id": db_task_id,
+                "old_assigned_to": old_staff_name,
+                "new_assigned_to": new_staff_name,
+                "reason": reason,
+            }
+        )
+
         conn.commit()
 
     except Exception as e:
@@ -1726,6 +1751,24 @@ async def reopen_task(
                     staff_row[0]
                 )
 
+        log_activity_with_cursor(
+            cur,
+            case_value=case_number or "",
+            event_code="TASK_REOPENED",
+            details=(
+                f"Task #{db_task_id}\n"
+                f"Reopened by user: {telegram_user_id}\n"
+                f"Task: {task_text or '-'}"
+            ),
+            source_module="TASK",
+            source_id=str(db_task_id),
+            user_id=telegram_user_id,
+            metadata={
+                "task_id": db_task_id,
+                "reopened_by": telegram_user_id,
+            }
+        )
+
         conn.commit()
 
     except Exception as e:
@@ -2119,6 +2162,24 @@ async def set_task_priority(
                 staff_telegram_user_id = (
                     staff_row[0]
                 )
+
+        log_activity_with_cursor(
+            cur,
+            case_value=case_number or "",
+            event_code="TASK_PRIORITY_CHANGED",
+            details=(
+                f"Task #{db_task_id}\n"
+                f"Priority changed to: {priority_value}\n"
+                f"Task: {task_text or '-'}"
+            ),
+            source_module="TASK",
+            source_id=str(db_task_id),
+            user_id=telegram_user_id,
+            metadata={
+                "task_id": db_task_id,
+                "priority": priority_value,
+            }
+        )
 
         conn.commit()
 
