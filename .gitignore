@@ -1,0 +1,19 @@
+# Secrets
+.env
+*.pem
+credentials.json
+token.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Local/runtime
+logs/
+*.log
+.DS_Store
+.vscode/
+.idea/
