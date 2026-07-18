@@ -1,1 +1,410 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
 
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Staff Attendance</title>
+
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 24px;
+            background: #f4f5f7;
+            text-align: center;
+        }
+
+        .card {
+            max-width: 420px;
+            margin: 30px auto;
+            background: white;
+            padding: 24px;
+            border-radius: 16px;
+            box-shadow:
+                0 4px 20px rgba(0, 0, 0, 0.08);
+        }
+
+        h1 {
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+
+        #staff {
+            margin-bottom: 20px;
+        }
+
+        button {
+            width: 100%;
+            padding: 16px;
+            margin-top: 14px;
+            border: none;
+            border-radius: 10px;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .checkin {
+            background: #198754;
+            color: white;
+        }
+
+        .moveoffice {
+            background: #0d6efd;
+            color: white;
+        }
+
+        .checkout {
+            background: #dc3545;
+            color: white;
+        }
+
+        #status {
+            margin-top: 22px;
+            white-space: pre-line;
+            font-size: 16px;
+            line-height: 1.45;
+            text-align: left;
+            padding: 14px;
+            border-radius: 10px;
+            background: #f8f9fa;
+            display: none;
+        }
+
+        #status.visible {
+            display: block;
+        }
+
+        #status.success {
+            background: #eaf7ee;
+        }
+
+        #status.error {
+            background: #fdecec;
+        }
+
+        #status.loading {
+            background: #eef4ff;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="card">
+
+    <h1>⚖️ Staff Attendance</h1>
+
+    <p id="staff">
+        Telegram staff attendance
+    </p>
+
+    <button
+        class="checkin attendance-button"
+        onclick="markAttendance('CHECKIN')"
+    >
+        🟢 CHECK IN
+    </button>
+
+    <button
+        class="moveoffice attendance-button"
+        onclick="markAttendance('MOVE')"
+    >
+        🔄 MOVE OFFICE
+    </button>
+
+    <button
+        class="checkout attendance-button"
+        onclick="markAttendance('CHECKOUT')"
+    >
+        🔴 CHECK OUT
+    </button>
+
+    <div id="status"></div>
+
+</div>
+
+<script>
+    const tg = window.Telegram.WebApp;
+
+    tg.ready();
+    tg.expand();
+
+    const user = tg.initDataUnsafe?.user;
+
+    const statusElement =
+        document.getElementById("status");
+
+    const attendanceButtons =
+        document.querySelectorAll(
+            ".attendance-button"
+        );
+
+    if (user) {
+        document.getElementById("staff").innerText =
+            "Welcome, " +
+            (user.first_name || "Staff");
+    }
+
+    function setStatus(
+        message,
+        type = ""
+    ) {
+        statusElement.innerText = message;
+
+        statusElement.className =
+            "visible " + type;
+    }
+
+    function setButtonsDisabled(
+        disabled
+    ) {
+        attendanceButtons.forEach(
+            function(button) {
+                button.disabled = disabled;
+            }
+        );
+    }
+
+    function actionLabel(action) {
+        if (action === "CHECKIN") {
+            return "check-in";
+        }
+
+        if (action === "CHECKOUT") {
+            return "check-out";
+        }
+
+        if (action === "MOVE") {
+            return "office transfer";
+        }
+
+        return "attendance";
+    }
+
+    function markAttendance(action) {
+
+        if (!user || !user.id) {
+            setStatus(
+                "❌ Telegram identity not available.",
+                "error"
+            );
+
+            return;
+        }
+
+        if (!tg.initData) {
+            setStatus(
+                "❌ Telegram verification data is unavailable.\n\n" +
+                "Please open this page from the bot.",
+                "error"
+            );
+
+            return;
+        }
+
+        setButtonsDisabled(true);
+
+        setStatus(
+            "📍 Getting your current location...",
+            "loading"
+        );
+
+        if (!navigator.geolocation) {
+            setButtonsDisabled(false);
+
+            setStatus(
+                "❌ GPS location is not supported.",
+                "error"
+            );
+
+            return;
+        }
+
+        navigator.geolocation.getCurrentPosition(
+
+            async function(position) {
+
+                setStatus(
+                    "⏳ Recording " +
+                    actionLabel(action) +
+                    "...",
+                    "loading"
+                );
+
+                const payload = {
+                    init_data: tg.initData,
+                    action: action,
+                    latitude:
+                        position.coords.latitude,
+                    longitude:
+                        position.coords.longitude,
+                    accuracy:
+                        position.coords.accuracy
+                };
+
+                try {
+
+                    const response = await fetch(
+                        "/api/attendance",
+                        {
+                            method: "POST",
+
+                            headers: {
+                                "Content-Type":
+                                    "application/json"
+                            },
+
+                            body:
+                                JSON.stringify(payload)
+                        }
+                    );
+
+                    const result =
+                        await response.json();
+
+                    if (result.success) {
+
+                        let message =
+                            "✅ " +
+                            result.message +
+                            "\n\n" +
+                            "👤 Staff: " +
+                            result.staff_name;
+
+                        if (result.office_name) {
+                            message +=
+                                "\n🏢 Office: " +
+                                result.office_name;
+                        }
+
+                        message +=
+                            "\n📍 GPS recorded" +
+                            "\n🎯 Accuracy: " +
+                            Math.round(
+                                result.accuracy ??
+                                payload.accuracy
+                            ) +
+                            " metres";
+
+                        if (
+                            result.distance_from_office
+                            !== undefined
+                        ) {
+                            message +=
+                                "\n📏 Distance from office: " +
+                                result.distance_from_office +
+                                " metres";
+                        }
+
+                        if (
+                            result.working_minutes
+                            !== undefined
+                        ) {
+                            const totalMinutes =
+                                Number(
+                                    result.working_minutes
+                                );
+
+                            const hours =
+                                Math.floor(
+                                    totalMinutes / 60
+                                );
+
+                            const minutes =
+                                totalMinutes % 60;
+
+                            message +=
+                                "\n⏱ Working time: " +
+                                hours +
+                                "h " +
+                                minutes +
+                                "m";
+                        }
+
+                        setStatus(
+                            message,
+                            "success"
+                        );
+
+                    } else {
+
+                        setStatus(
+                            "❌ " +
+                            (
+                                result.message ||
+                                "Attendance action failed."
+                            ),
+                            "error"
+                        );
+                    }
+
+                } catch (error) {
+
+                    setStatus(
+                        "❌ Connection error: " +
+                        error.message,
+                        "error"
+                    );
+
+                } finally {
+
+                    setButtonsDisabled(false);
+                }
+            },
+
+            function(error) {
+
+                setButtonsDisabled(false);
+
+                let reason =
+                    "Location permission denied " +
+                    "or GPS unavailable.";
+
+                if (error.code === 1) {
+                    reason =
+                        "Location permission was denied.";
+                }
+
+                if (error.code === 2) {
+                    reason =
+                        "Current location could not be determined.";
+                }
+
+                if (error.code === 3) {
+                    reason =
+                        "Location request timed out.";
+                }
+
+                setStatus(
+                    "❌ " +
+                    reason +
+                    "\n\nPlease enable precise location " +
+                    "permission and try again.",
+                    "error"
+                );
+            },
+
+            {
+                enableHighAccuracy: true,
+                timeout: 20000,
+                maximumAge: 0
+            }
+        );
+    }
+</script>
+
+</body>
+</html>
