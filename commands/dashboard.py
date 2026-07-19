@@ -1086,10 +1086,27 @@ def build_morning_dashboard():
             message += "✅ No pending tasks.\n\n"
 
     if advocate_diaries_live:
-        message += build_court_movement_summary(groups) + "\n\n"
-        if database_live:
-            message += build_staff_deployment_summary(groups, task_lookup) + "\n\n"
-        message += cause_text + "\n\n"
+        if total_hearings == 0:
+            day_name = today.strftime("%A")
+            message += (
+                "⚖️ TODAY'S COURT SCHEDULE\n\n"
+                "No hearings are listed for today.\n"
+            )
+            if day_name == "Sunday":
+                message += (
+                    "Court movement and staff deployment are not "
+                    "required for the regular Sunday schedule.\n\n"
+                )
+            else:
+                message += (
+                    "Court movement and staff deployment are not "
+                    "required unless a hearing is added later.\n\n"
+                )
+        else:
+            message += build_court_movement_summary(groups) + "\n\n"
+            if database_live:
+                message += build_staff_deployment_summary(groups, task_lookup) + "\n\n"
+            message += cause_text + "\n\n"
     else:
         message += cause_text + "\n\n"
 
