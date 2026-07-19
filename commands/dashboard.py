@@ -1031,7 +1031,8 @@ def build_morning_dashboard():
     message = (
         "🌅 LAW OFFICE MORNING DASHBOARD\n"
         f"📅 {today.strftime('%d-%m-%Y')}\n"
-        f"🕘 Refreshed: {now.strftime('%I:%M %p')} IST\n\n"
+        f"🕘 Refreshed: {now.strftime('%I:%M %p')} IST\n"
+        "🧩 Build: Sprint 10.3 Empty-State Fix\n\n"
         "📡 DATA STATUS\n"
         f"{'✅' if database_live else '⚠️'} Office Database: "
         f"{'Live' if database_live else 'Unavailable'}\n"
@@ -1086,7 +1087,11 @@ def build_morning_dashboard():
             message += "✅ No pending tasks.\n\n"
 
     if advocate_diaries_live:
-        if total_hearings == 0:
+        # Treat any empty normalized result as a zero-hearing day.  Some
+        # Advocate Diaries responses report counts as strings or omit the
+        # count while returning an empty group list.
+        has_hearings = bool(groups) and any(group.get("cases") for group in groups)
+        if not has_hearings:
             day_name = today.strftime("%A")
             message += (
                 "⚖️ TODAY'S COURT SCHEDULE\n\n"
