@@ -1,5 +1,6 @@
 import os
 import re
+import logging
 from collections import defaultdict
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
@@ -672,61 +673,131 @@ def build_floor_wise_cause_list(
 
 
 
-def build_morning_dashboard():
-    now = datetime.now(IST)
-    today = now.date()
+def _dashboard_table_columns(cur, table_name):
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = %s
+        """,
+        (table_name,),
+    )
+    return {row[0] for row in cur.fetchall()}
 
-    conn = psycopg2.connect(DATABASE_URL)
+
+def _load_morning_dashboard_database(today):
+    """Load Sprint 10 dashboard data without assuming every migration exists."""
+    conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
     cur = conn.cursor()
 
     try:
-        cur.execute("""
-            SELECT
-                id,
-                assigned_to,
-                case_number,
-                task,
-                deadline,
-                due_at,
-                source_type,
-                notes,
-                created_at,
-                COALESCE(priority, 'NORMAL') AS priority
-            FROM tasks
-            WHERE UPPER(status) = 'PENDING'
-            ORDER BY
-                CASE UPPER(COALESCE(priority, 'NORMAL'))
-                    WHEN 'URGENT' THEN 1
-                    WHEN 'HIGH' THEN 2
-                    WHEN 'NORMAL' THEN 3
-                    WHEN 'LOW' THEN 4
-                    ELSE 5
-                END,
-                due_at ASC NULLS LAST,
-                created_at ASC NULLS LAST,
-                id ASC
-        """)
+        task_columns = _dashboard_table_columns(cur, "tasks")
+        case_columns = _dashboard_table_columns(cur, "cases")
 
-        task_rows = cur.fetchall()
+        task_rows = []
+        case_rows = []
+        warnings = []
 
-        cur.execute("""
-            SELECT
-                case_number,
-                case_id,
-                client_name,
-                case_title,
-                drive_folder_id
-            FROM cases
-        """)
+        if task_columns:
+            def task_expr(column, fallback="NULL"):
+                return column if column in task_columns else fallback
 
-        case_rows = cur.fetchall()
+            status_filter = (
+                "WHERE UPPER(COALESCE(status, 'PENDING')) = 'PENDING'"
+                if "status" in task_columns
+                else ""
+            )
+            priority_expr = (
+                "COALESCE(priority, 'NORMAL')"
+                if "priority" in task_columns
+                else "'NORMAL'"
+            )
+            order_parts = []
+            if "priority" in task_columns:
+                order_parts.append(
+                    "CASE UPPER(COALESCE(priority, 'NORMAL')) "
+                    "WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2 "
+                    "WHEN 'NORMAL' THEN 3 WHEN 'LOW' THEN 4 ELSE 5 END"
+                )
+            if "due_at" in task_columns:
+                order_parts.append("due_at ASC NULLS LAST")
+            if "created_at" in task_columns:
+                order_parts.append("created_at ASC NULLS LAST")
+            if "id" in task_columns:
+                order_parts.append("id ASC")
+            order_sql = " ORDER BY " + ", ".join(order_parts) if order_parts else ""
 
+            cur.execute(
+                f"""
+                SELECT
+                    {task_expr('id', '0')},
+                    {task_expr('assigned_to', "'Unassigned'")},
+                    {task_expr('case_number', "''")},
+                    {task_expr('task', "''")},
+                    {task_expr('deadline')},
+                    {task_expr('due_at')},
+                    {task_expr('source_type', "''")},
+                    {task_expr('notes', "''")},
+                    {task_expr('created_at')},
+                    {priority_expr} AS priority
+                FROM tasks
+                {status_filter}
+                {order_sql}
+                """
+            )
+            task_rows = cur.fetchall()
+        else:
+            warnings.append("Tasks table is unavailable; workload figures were omitted.")
+
+        if case_columns:
+            def case_expr(column, fallback="''"):
+                return column if column in case_columns else fallback
+
+            cur.execute(
+                f"""
+                SELECT
+                    {case_expr('case_number')},
+                    {case_expr('case_id')},
+                    {case_expr('client_name')},
+                    {case_expr('case_title')},
+                    {case_expr('drive_folder_id')}
+                FROM cases
+                """
+            )
+            case_rows = cur.fetchall()
+        else:
+            warnings.append("Cases table is unavailable; case links were omitted.")
+
+        return task_rows, case_rows, warnings
     finally:
         cur.close()
         conn.close()
 
-    case_lookup = {}
 
+def build_morning_dashboard():
+    """Build the Sprint 10 briefing with independently resilient data sources."""
+    now = datetime.now(IST)
+    today = now.date()
+    logger = logging.getLogger(__name__)
+
+    task_rows = []
+    case_rows = []
+    source_warnings = []
+    database_live = False
+    advocate_diaries_live = False
+
+    try:
+        task_rows, case_rows, database_warnings = _load_morning_dashboard_database(today)
+        source_warnings.extend(database_warnings)
+        database_live = True
+    except Exception as exc:
+        logger.exception("Morning dashboard database source failed")
+        source_warnings.append(
+            f"Office database unavailable ({type(exc).__name__}); task and case figures were omitted."
+        )
+
+    case_lookup = {}
     for (
         case_number,
         case_id,
@@ -739,7 +810,6 @@ def build_morning_dashboard():
             "case_title": case_title or "",
             "drive_folder_id": drive_folder_id or "",
         }
-
         for key in {
             normalize_space(case_number).lower(),
             normalize_space(case_id).lower(),
@@ -791,7 +861,6 @@ def build_morning_dashboard():
             data["manual_tasks"] += 1
 
         key = normalize_space(case_number).lower()
-
         if key:
             task_lookup[key].append({
                 "id": task_id,
@@ -801,7 +870,6 @@ def build_morning_dashboard():
             })
 
         parsed_deadline = parse_task_date(due_at or deadline)
-
         item = {
             "id": task_id,
             "staff": staff_name,
@@ -815,140 +883,134 @@ def build_morning_dashboard():
 
         if not parsed_deadline:
             continue
-
         if parsed_deadline.date() < today:
             overdue_tasks.append(item)
             data["overdue"] += 1
-
         elif parsed_deadline.date() == today:
             due_today_tasks.append(item)
             data["due_today"] += 1
 
-    groups = fetch_advocate_diaries_cause_groups(today)
-
-    cause_text, total_hearings = build_floor_wise_cause_list(
-        groups,
-        case_lookup,
-        task_lookup
+    groups = []
+    cause_text = (
+        "⚖️ FLOOR-WISE CAUSE LIST\n\n"
+        "⚠️ Advocate Diaries data is currently unavailable."
     )
+    total_hearings = None
+
+    try:
+        groups = fetch_advocate_diaries_cause_groups(today)
+        cause_text, total_hearings = build_floor_wise_cause_list(
+            groups,
+            case_lookup,
+            task_lookup
+        )
+        advocate_diaries_live = True
+    except Exception as exc:
+        logger.exception("Morning dashboard Advocate Diaries source failed")
+        source_warnings.append(
+            f"Advocate Diaries unavailable ({type(exc).__name__}); cause list and court movement were omitted."
+        )
 
     urgent_staff = []
-
     for staff_name, data in staff_summary.items():
         urgent_count = data["priority_counts"]["URGENT"]
-
         if urgent_count:
             urgent_staff.append(f"{staff_name}: {urgent_count}")
 
+    hearing_text = str(total_hearings) if total_hearings is not None else "Unavailable"
     message = (
         "🌅 LAW OFFICE MORNING DASHBOARD\n"
-        f"📅 {today.strftime('%d-%m-%Y')}\n\n"
-        f"⚖️ Today's Hearings: {total_hearings}\n"
-        f"🔴 Overdue Tasks: {len(overdue_tasks)}\n"
-        f"🟠 Tasks Due Today: {len(due_today_tasks)}\n"
-        f"📘 Pending AD-linked Tasks: {ad_pending_count}\n"
-        f"📋 Total Pending Tasks: {len(task_rows)}\n\n"
-        f"🔴 Urgent: {office_priority_counts['URGENT']}\n"
-        f"🟠 High: {office_priority_counts['HIGH']}\n"
-        f"🔵 Normal: {office_priority_counts['NORMAL']}\n"
-        f"⚪ Low: {office_priority_counts['LOW']}\n\n"
+        f"📅 {today.strftime('%d-%m-%Y')}\n"
+        f"🕘 Refreshed: {now.strftime('%I:%M %p')} IST\n\n"
+        "📡 DATA STATUS\n"
+        f"{'✅' if database_live else '⚠️'} Office Database: "
+        f"{'Live' if database_live else 'Unavailable'}\n"
+        f"{'✅' if advocate_diaries_live else '⚠️'} Advocate Diaries: "
+        f"{'Live' if advocate_diaries_live else 'Unavailable'}\n\n"
+        f"⚖️ Today's Hearings: {hearing_text}\n"
+        f"🔴 Overdue Tasks: {len(overdue_tasks) if database_live else 'Unavailable'}\n"
+        f"🟠 Tasks Due Today: {len(due_today_tasks) if database_live else 'Unavailable'}\n"
+        f"📘 Pending AD-linked Tasks: {ad_pending_count if database_live else 'Unavailable'}\n"
+        f"📋 Total Pending Tasks: {len(task_rows) if database_live else 'Unavailable'}\n\n"
     )
 
-    if urgent_staff:
+    if database_live:
         message += (
-            "🔥 OFFICE FOCUS\n"
-            + "\n".join(f"• {item}" for item in urgent_staff)
-            + "\n\n"
+            f"🔴 Urgent: {office_priority_counts['URGENT']}\n"
+            f"🟠 High: {office_priority_counts['HIGH']}\n"
+            f"🔵 Normal: {office_priority_counts['NORMAL']}\n"
+            f"⚪ Low: {office_priority_counts['LOW']}\n\n"
         )
-    else:
-        message += "🔥 OFFICE FOCUS\nNo urgent tasks pending.\n\n"
 
-    message += "👥 STAFF-WISE WORKLOAD\n\n"
+    if source_warnings:
+        message += "⚠️ SOURCE NOTICES\n" + "\n".join(
+            f"• {warning}" for warning in source_warnings
+        ) + "\n\n"
 
-    if staff_summary:
-        for staff_name in sorted(staff_summary):
-            data = staff_summary[staff_name]
-            counts = data["priority_counts"]
+    if database_live:
+        if urgent_staff:
+            message += "🔥 OFFICE FOCUS\n" + "\n".join(
+                f"• {item}" for item in urgent_staff
+            ) + "\n\n"
+        else:
+            message += "🔥 OFFICE FOCUS\nNo urgent tasks pending.\n\n"
 
-            message += (
-                f"👤 {staff_name.upper()}\n"
-                f"📋 Pending: {data['total']}\n"
-                f"🔴 Urgent: {counts['URGENT']}\n"
-                f"🟠 High: {counts['HIGH']}\n"
-                f"🔵 Normal: {counts['NORMAL']}\n"
-                f"⚪ Low: {counts['LOW']}\n"
-                f"🔴 Overdue: {data['overdue']}\n"
-                f"🟠 Due Today: {data['due_today']}\n"
-                f"📘 AD Work: {data['ad_tasks']}\n"
-                f"📝 Manual: {data['manual_tasks']}\n\n"
-            )
-    else:
-        message += "✅ No pending tasks.\n\n"
-
-    movement_summary = build_court_movement_summary(groups)
-    deployment_summary = build_staff_deployment_summary(
-        groups,
-        task_lookup
-    )
-
-    message += (
-        movement_summary
-        + "\n\n"
-        + deployment_summary
-        + "\n\n"
-        + cause_text
-        + "\n\n"
-    )
-
-    message += "🔴 OVERDUE TASKS\n\n"
-
-    if overdue_tasks:
-        for item in overdue_tasks:
-            icon = priority_icon(item["priority"])
-            message += (
-                f"{icon} Task #{item['id']}\n"
-                f"👤 {item['staff']}\n"
-            )
-
-            if item["case_number"]:
-                message += f"🔢 {item['case_number']}\n"
-
-            message += f"📝 {item['task']}\n"
-
-            if item["deadline"]:
+        message += "👥 STAFF-WISE WORKLOAD\n\n"
+        if staff_summary:
+            for staff_name in sorted(staff_summary):
+                data = staff_summary[staff_name]
+                counts = data["priority_counts"]
                 message += (
-                    f"⏰ Due: "
-                    f"{item['deadline'].strftime('%d-%m-%Y %I:%M %p')}\n"
+                    f"👤 {staff_name.upper()}\n"
+                    f"📋 Pending: {data['total']}\n"
+                    f"🔴 Urgent: {counts['URGENT']}\n"
+                    f"🟠 High: {counts['HIGH']}\n"
+                    f"🔵 Normal: {counts['NORMAL']}\n"
+                    f"⚪ Low: {counts['LOW']}\n"
+                    f"🔴 Overdue: {data['overdue']}\n"
+                    f"🟠 Due Today: {data['due_today']}\n"
+                    f"📘 AD Work: {data['ad_tasks']}\n"
+                    f"📝 Manual: {data['manual_tasks']}\n\n"
                 )
+        else:
+            message += "✅ No pending tasks.\n\n"
 
-            message += "\n"
+    if advocate_diaries_live:
+        message += build_court_movement_summary(groups) + "\n\n"
+        if database_live:
+            message += build_staff_deployment_summary(groups, task_lookup) + "\n\n"
+        message += cause_text + "\n\n"
     else:
-        message += "✅ No overdue tasks.\n\n"
+        message += cause_text + "\n\n"
 
-    message += "🟠 TASKS DUE TODAY\n\n"
+    if database_live:
+        message += "🔴 OVERDUE TASKS\n\n"
+        if overdue_tasks:
+            for item in overdue_tasks:
+                icon = priority_icon(item["priority"])
+                message += f"{icon} Task #{item['id']}\n👤 {item['staff']}\n"
+                if item["case_number"]:
+                    message += f"🔢 {item['case_number']}\n"
+                message += f"📝 {item['task']}\n"
+                if item["deadline"]:
+                    message += f"⏰ Due: {item['deadline'].strftime('%d-%m-%Y %I:%M %p')}\n"
+                message += "\n"
+        else:
+            message += "✅ No overdue tasks.\n\n"
 
-    if due_today_tasks:
-        for item in due_today_tasks:
-            icon = priority_icon(item["priority"])
-            message += (
-                f"{icon} Task #{item['id']}\n"
-                f"👤 {item['staff']}\n"
-            )
-
-            if item["case_number"]:
-                message += f"🔢 {item['case_number']}\n"
-
-            message += f"📝 {item['task']}\n"
-
-            if item["deadline"]:
-                message += (
-                    f"⏰ Due: "
-                    f"{item['deadline'].strftime('%d-%m-%Y %I:%M %p')}\n"
-                )
-
-            message += "\n"
-    else:
-        message += "No tasks are due today.\n\n"
+        message += "🟠 TASKS DUE TODAY\n\n"
+        if due_today_tasks:
+            for item in due_today_tasks:
+                icon = priority_icon(item["priority"])
+                message += f"{icon} Task #{item['id']}\n👤 {item['staff']}\n"
+                if item["case_number"]:
+                    message += f"🔢 {item['case_number']}\n"
+                message += f"📝 {item['task']}\n"
+                if item["deadline"]:
+                    message += f"⏰ Due: {item['deadline'].strftime('%d-%m-%Y %I:%M %p')}\n"
+                message += "\n"
+        else:
+            message += "No tasks are due today.\n\n"
 
     message += (
         "Commands:\n"
@@ -956,7 +1018,6 @@ def build_morning_dashboard():
         "/taskdetails TASK_ID — task details\n"
         "/taskhistory STAFF pending — staff workload"
     )
-
     return message
 
 
