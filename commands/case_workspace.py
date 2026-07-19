@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes
 
 from services.case_timeline_service import get_case_timeline, render_timeline
 from services.case_document_service import document_counts, list_case_documents, render_document_list
+from commands.finance_ledger import case_fee_ledger
 from services.case_workspace_service import (
     CaseSummary,
     get_case,
@@ -291,18 +292,8 @@ async def case_workspace_callback(update: Update, context: ContextTypes.DEFAULT_
         heading = f"{category.replace('_', ' ').title()} DOCUMENTS"
         text = render_document_list(case, documents, heading)
     elif action == "fees":
-        entries = get_fee_installments(case)
-        text = (
-            "💰 <b>FEES</b>\n\n"
-            f"Agreed: {esc(case.fee_agreed)}\n"
-            f"Advance: {esc(case.advance_received)}\n"
-        )
-        if entries:
-            text += "\n<b>Installments</b>\n"
-            for item in entries:
-                text += f"• {esc(item.get('amount'))} · {esc(item.get('date'))}\n"
-        else:
-            text += "\nNo installment entries found."
+        await case_fee_ledger(update, context, case)
+        return
     elif action == "notes":
         text = f"📝 <b>CASE NOTES</b>\n\n{esc(case.notes)}"
     elif action == "staff":
