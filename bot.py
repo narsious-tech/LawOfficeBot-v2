@@ -13,8 +13,6 @@ from commands.attendance import (
     checkout,
     approve_attendance,
     linkstaff,
-    linkedstaff,
-    delinkstaff,
     teststafflogin,
     monitor_attendance_job
 )
@@ -102,6 +100,7 @@ from commands.files import (
     WAITING_FILE,
     CONFIRM_DUPLICATE_UPLOAD,
     upload_start,
+    upload_category_callback,
     upload_file,
     duplicate_upload_callback,
     cancel_upload,
@@ -3422,6 +3421,10 @@ upload_handler = ConversationHandler(
         CommandHandler(
             "upload",
             upload_start
+        ),
+        CallbackQueryHandler(
+            upload_category_callback,
+            pattern=r"^docupload:"
         )
     ],
 
@@ -3560,8 +3563,6 @@ app.add_handler(
     CommandHandler("approveattendance", approve_attendance)
 )
 app.add_handler(CommandHandler("linkstaff", linkstaff))
-app.add_handler(CommandHandler("linkedstaff", linkedstaff))
-app.add_handler(CommandHandler("delinkstaff", delinkstaff))
 app.add_handler(CommandHandler("checkin", checkin))
 app.add_handler(CommandHandler("checkout", checkout))
 app.add_handler(CommandHandler("testweb", test_web))
