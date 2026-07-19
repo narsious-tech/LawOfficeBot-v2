@@ -218,6 +218,30 @@ async def send_long_message(
         )
 
 
+def find_case_record_by_db_id(case_db_id: int) -> Optional[Tuple]:
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            SELECT
+                id,
+                case_id,
+                case_number,
+                case_title,
+                client_name,
+                drive_folder_id,
+                drive_folder_link
+            FROM cases
+            WHERE id = %s
+            LIMIT 1
+        """, (case_db_id,))
+        return cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+
+
 def find_case_record(
     case_value: str
 ) -> Optional[Tuple]:
@@ -386,6 +410,143 @@ async def casefolder(
         )
 
 
+async def _prepare_upload_session(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    case_value: str,
+    category_input: str,
+):
+    """Prepare Drive folders and transition into the existing file-upload state."""
+    case_value = normalize_case_value(case_value)
+    category = normalize_document_category(category_input)
+    folder_name = category_folder_name(category)
+    case_row = find_case_record(case_value)
+
+    if not case_row:
+        await update.effective_message.reply_text(
+            f"❌ Case not found: {case_value}"
+        )
+        return ConversationHandler.END
+
+    (
+        _case_db_id,
+        case_id,
+        case_number,
+        case_title,
+        client_name,
+        case_folder_id,
+        case_folder_link,
+    ) = case_row
+
+    canonical_case_id = case_id or case_number or case_value
+
+    if not case_folder_id:
+        await update.effective_message.reply_text(
+            f"❌ Google Drive folder not found for {canonical_case_id}.\n\n"
+            f"Use /casefolder {canonical_case_id} first."
+        )
+        return ConversationHandler.END
+
+    try:
+        target_folder_id, _target_folder_link = get_or_create_subfolder(
+            case_folder_id,
+            folder_name,
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            "❌ Could not prepare the document category folder:\n"
+            f"{type(exc).__name__}: {exc}"
+        )
+        return ConversationHandler.END
+
+    context.user_data["upload_case_id"] = canonical_case_id
+    context.user_data["upload_case_folder_id"] = case_folder_id
+    context.user_data["upload_folder_id"] = target_folder_id
+    context.user_data["upload_category"] = category
+    context.user_data["upload_category_name"] = folder_name
+
+    message = f"📂 Case found: {canonical_case_id}\n"
+    if case_title:
+        message += f"⚖️ {case_title}\n"
+    if client_name:
+        message += f"👤 Client: {client_name}\n"
+    message += (
+        f"🗂 Category: {folder_name}\n\n"
+        "Now send the PDF, Word file, document, or photo to upload.\n\n"
+        "Use /cancel to stop."
+    )
+
+    await update.effective_message.reply_text(
+        message,
+        disable_web_page_preview=True,
+    )
+    return WAITING_FILE
+
+
+async def upload_category_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    """Menu-driven upload entry point used from the Case Documents workspace."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    parts = data.split(":")
+
+    if len(parts) < 3 or not parts[2].isdigit():
+        await query.edit_message_text("❌ Invalid document upload selection.")
+        return ConversationHandler.END
+
+    mode = parts[1]
+    case_db_id = int(parts[2])
+    case_row = find_case_record_by_db_id(case_db_id)
+    if not case_row:
+        await query.edit_message_text("❌ This case is no longer available.")
+        return ConversationHandler.END
+
+    case_value = case_row[2] or case_row[1]
+
+    if mode == "choose":
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📝 Pleadings", callback_data=f"docupload:PLEADINGS:{case_db_id}"),
+                InlineKeyboardButton("⚖️ Orders", callback_data=f"docupload:ORDERS:{case_db_id}"),
+            ],
+            [
+                InlineKeyboardButton("🧾 Evidence", callback_data=f"docupload:EVIDENCE:{case_db_id}"),
+                InlineKeyboardButton("📚 Judgments", callback_data=f"docupload:JUDGMENTS:{case_db_id}"),
+            ],
+            [
+                InlineKeyboardButton("✉️ Correspondence", callback_data=f"docupload:CORRESPONDENCE:{case_db_id}"),
+                InlineKeyboardButton("📎 Miscellaneous", callback_data=f"docupload:MISCELLANEOUS:{case_db_id}"),
+            ],
+            [InlineKeyboardButton("⬅️ Cancel", callback_data=f"casews:documents:{case_db_id}")],
+        ])
+        await query.edit_message_text(
+            "➕ <b>UPLOAD NEW DOCUMENT</b>\n\n"
+            f"Case: <code>{case_value}</code>\n\n"
+            "Select the document category:",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        return ConversationHandler.END
+
+    if mode not in DOCUMENT_CATEGORIES:
+        await query.edit_message_text("❌ Invalid document category.")
+        return ConversationHandler.END
+
+    await query.edit_message_text(
+        "⏳ Preparing the Google Drive folder...",
+    )
+    return await _prepare_upload_session(
+        update,
+        context,
+        case_value=case_value,
+        category_input=mode,
+    )
+
+
 async def upload_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -404,116 +565,14 @@ async def upload_start(
         )
         return ConversationHandler.END
 
-    case_value = normalize_case_value(
-        context.args[0]
+    case_value = context.args[0]
+    category_input = context.args[1] if len(context.args) > 1 else "miscellaneous"
+    return await _prepare_upload_session(
+        update,
+        context,
+        case_value=case_value,
+        category_input=category_input,
     )
-
-    category_input = (
-        context.args[1]
-        if len(context.args) > 1
-        else "miscellaneous"
-    )
-
-    category = normalize_document_category(
-        category_input
-    )
-
-    folder_name = category_folder_name(
-        category
-    )
-
-    case_row = find_case_record(
-        case_value
-    )
-
-    if not case_row:
-        await update.effective_message.reply_text(
-            f"❌ Case not found: {case_value}"
-        )
-        return ConversationHandler.END
-
-    (
-        _case_db_id,
-        case_id,
-        case_number,
-        case_title,
-        client_name,
-        case_folder_id,
-        case_folder_link
-    ) = case_row
-
-    canonical_case_id = (
-        case_id
-        or case_number
-        or case_value
-    )
-
-    if not case_folder_id:
-        await update.effective_message.reply_text(
-            f"❌ Google Drive folder not found for "
-            f"{canonical_case_id}.\n\n"
-            f"Use /casefolder {canonical_case_id} first."
-        )
-        return ConversationHandler.END
-
-    try:
-        target_folder_id, target_folder_link = (
-            get_or_create_subfolder(
-                case_folder_id,
-                folder_name
-            )
-        )
-
-    except Exception as exc:
-        await update.effective_message.reply_text(
-            "❌ Could not prepare the document "
-            "category folder:\n"
-            f"{type(exc).__name__}: {exc}"
-        )
-        return ConversationHandler.END
-
-    context.user_data[
-        "upload_case_id"
-    ] = canonical_case_id
-
-    context.user_data[
-        "upload_case_folder_id"
-    ] = case_folder_id
-
-    context.user_data[
-        "upload_folder_id"
-    ] = target_folder_id
-
-    context.user_data[
-        "upload_category"
-    ] = category
-
-    context.user_data[
-        "upload_category_name"
-    ] = folder_name
-
-    message = (
-        f"📂 Case found: {canonical_case_id}\n"
-    )
-
-    if case_title:
-        message += f"⚖️ {case_title}\n"
-
-    if client_name:
-        message += f"👤 Client: {client_name}\n"
-
-    message += (
-        f"🗂 Category: {folder_name}\n\n"
-        "Now send the document, PDF, Word file, "
-        "or photo to upload."
-    )
-
-    await update.effective_message.reply_text(
-        message,
-        disable_web_page_preview=True
-    )
-
-    return WAITING_FILE
 
 
 async def complete_drive_upload(

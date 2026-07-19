@@ -254,6 +254,7 @@ async def case_workspace_callback(update: Update, context: ContextTypes.DEFAULT_
             f"Full list: <code>/files {esc(identifier)}</code>"
         )
         rows = [
+            [InlineKeyboardButton("➕ Upload New Document", callback_data=f"docupload:choose:{db_id}")],
             [
                 InlineKeyboardButton("📄 All Files", callback_data=f"casews:doclist:{db_id}"),
                 InlineKeyboardButton("📝 Pleadings", callback_data=f"casews:doccat_PLEADINGS:{db_id}"),
