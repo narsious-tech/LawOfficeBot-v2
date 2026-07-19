@@ -95,7 +95,9 @@ from commands.dashboard import (
     morning_dashboard_callback,
     morning_dashboard_job,
     staff_morning_brief_job,
-    test_staff_morning_briefs
+    test_staff_morning_briefs,
+    fetch_advocate_diaries_cause_groups,
+    normalize_space,
 )
 from commands.files import (
     WAITING_FILE,
@@ -870,75 +872,144 @@ async def tomorrowcause(update, context):
     context.args = [tomorrow]
     await todayhearings(update, context)
 
-async def daily_cause_list_job(context):
-    from advocate_diaries import AdvocateDiaries
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    import os
+async def _send_cause_list_chunks(context, chat_id, chunks):
+    """Send cause-list chunks safely within Telegram's message limit."""
+    for index, chunk in enumerate(chunks, start=1):
+        suffix = f"\n\n📄 Part {index}/{len(chunks)}" if len(chunks) > 1 else ""
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(chunk + suffix)[:4090],
+        )
 
-    group_id = os.getenv("OFFICE_GROUP_CHAT_ID")
 
-    if not group_id:
-        raise Exception("OFFICE_GROUP_CHAT_ID is missing")
-
-    today_dt = datetime.now(ZoneInfo("Asia/Kolkata"))
-    today = today_dt.strftime("%Y-%m-%d")
-    display_date = today_dt.strftime("%d-%m-%Y | %A")
-
-    ad = AdvocateDiaries()
-    data = ad.daily_cause_list(today)
-
-    if not data.get("success"):
-        message = f"❌ Could not fetch Daily Cause List for {display_date}"
-    else:
-        cause_data = data.get("data", {})
-        total_cases = cause_data.get("total_cases", 0)
-        groups = cause_data.get("groups", [])
-
-        if total_cases == 0:
-            message = (
-                f"📅 DAILY CAUSE LIST\n"
-                f"{display_date}\n\n"
-                f"No cases are listed for today."
-            )
-        else:
-            message = (
-                f"📅 DAILY CAUSE LIST\n"
-                f"{display_date}\n\n"
-                f"Total Cases: {total_cases}\n\n"
-            )
-
-            for group in groups:
-                group_name = (
-                    group.get("court")
-                    or group.get("court_name")
-                    or group.get("name")
-                    or "Court"
-                )
-
-                message += f"⚖️ {group_name}\n"
-
-                cases = group.get("cases", [])
-
-                for i, case in enumerate(cases, start=1):
-                    case_no = case.get("case_number") or case.get("case_no") or "-"
-                    title = case.get("title") or case.get("case_title") or "-"
-                    stage = case.get("stage") or case.get("purpose") or "-"
-                    time = case.get("time") or case.get("case_time") or "-"
-
-                    message += (
-                        f"{i}. {case_no}\n"
-                        f"   {title}\n"
-                        f"   Stage: {stage}\n"
-                        f"   Time: {time}\n\n"
-                    )
-
-                message += "\n"
-
-    await context.bot.send_message(
-        chat_id=int(group_id),
-        text=message[:3900]
+def _build_daily_cause_list_chunks(groups, display_date, source):
+    """Build readable, court-wise cause-list messages without splitting a matter."""
+    total_cases = sum(len(group.get("cases") or []) for group in groups)
+    header = (
+        "⚖️ AUTOMATIC MORNING CAUSE LIST\n"
+        f"📅 {display_date}\n"
+        f"📌 Total Matters: {total_cases}\n"
+        f"🔗 Source: Advocate Diaries {source}\n"
+        "━━━━━━━━━━━━━━━━━━━━"
     )
+
+    if total_cases == 0:
+        return [
+            header
+            + "\n\nNo hearings are listed for today.\n"
+            + "Court movement and deployment are not required."
+        ]
+
+    blocks = []
+    running_number = 1
+    for group in groups:
+        court = normalize_space(group.get("court_name")) or "Court not recorded"
+        judge = normalize_space(group.get("judge_name")) or "Judge not recorded"
+        floor = normalize_space(group.get("floor"))
+        room = normalize_space(group.get("room"))
+        location_bits = []
+        if floor:
+            location_bits.append(f"Floor {floor}")
+        if room:
+            location_bits.append(f"Room {room}")
+        location = " • ".join(location_bits)
+
+        lines = [
+            f"🏛 {court}",
+            f"👨‍⚖️ {judge}",
+        ]
+        if location:
+            lines.append(f"📍 {location}")
+        lines.append(f"📌 Matters: {len(group.get('cases') or [])}")
+        lines.append("")
+
+        for case_item in group.get("cases") or []:
+            case_number = normalize_space(case_item.get("case_number")) or "Case number not recorded"
+            case_title = normalize_space(case_item.get("case_title")) or "Title not recorded"
+            stage = normalize_space(case_item.get("stage"))
+            previous_date = normalize_space(case_item.get("previous_date"))
+            lines.extend([
+                f"{running_number}. {case_number}",
+                f"   {case_title}",
+            ])
+            if stage:
+                lines.append(f"   📝 Stage: {stage}")
+            if previous_date:
+                lines.append(f"   ⏮ Previous date: {previous_date}")
+            lines.append("")
+            running_number += 1
+
+        blocks.append("\n".join(lines).rstrip())
+
+    chunks = []
+    current = header
+    for block in blocks:
+        candidate = current + "\n\n" + block
+        if len(candidate) <= 3750:
+            current = candidate
+            continue
+        chunks.append(current)
+        current = header + "\n\n" + block
+        if len(current) > 3750:
+            # Extremely large court group: split on matter boundaries/lines.
+            lines = current.splitlines()
+            current = ""
+            for line in lines:
+                candidate = (current + "\n" + line).strip("\n")
+                if len(candidate) > 3750 and current:
+                    chunks.append(current)
+                    current = header + "\n\n" + line
+                else:
+                    current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def send_daily_cause_list(context, force=False):
+    """Fetch and deliver today's cause list once per day unless explicitly forced."""
+    group_id = os.getenv("OFFICE_GROUP_CHAT_ID")
+    if not group_id:
+        raise RuntimeError("OFFICE_GROUP_CHAT_ID is missing")
+
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    date_key = now.strftime("%Y-%m-%d")
+    display_date = now.strftime("%d-%m-%Y | %A")
+    sent_key = "automatic_cause_list_last_sent_date"
+
+    if not force and context.application.bot_data.get(sent_key) == date_key:
+        print(f"AUTOMATIC CAUSE LIST SKIPPED: already sent for {date_key}")
+        return "duplicate"
+
+    try:
+        groups, source = await asyncio.to_thread(
+            fetch_advocate_diaries_cause_groups,
+            now.date(),
+        )
+        chunks = _build_daily_cause_list_chunks(groups, display_date, source)
+        await _send_cause_list_chunks(context, int(group_id), chunks)
+        context.application.bot_data[sent_key] = date_key
+        print(
+            "AUTOMATIC CAUSE LIST SENT: "
+            f"date={date_key}, matters={sum(len(g.get('cases') or []) for g in groups)}, "
+            f"source={source}, messages={len(chunks)}"
+        )
+        return "sent"
+    except Exception as exc:
+        detail = normalize_space(str(exc)) or "No diagnostic detail was returned."
+        failure_message = (
+            "❌ AUTOMATIC MORNING CAUSE LIST FAILED\n"
+            f"📅 {display_date}\n\n"
+            f"Reason: {type(exc).__name__}: {detail[:800]}\n\n"
+            "Use /testcausejob after checking Advocate Diaries configuration."
+        )
+        await context.bot.send_message(chat_id=int(group_id), text=failure_message)
+        print(f"AUTOMATIC CAUSE LIST FAILED: {type(exc).__name__}: {exc}")
+        raise
+
+
+async def daily_cause_list_job(context):
+    await send_daily_cause_list(context, force=False)
 
 async def pending_tasks_summary_job(context):
     from commands.works import pendingtasks, mytasks
@@ -1026,10 +1097,11 @@ async def test_cause_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        await daily_cause_list_job(context)
+        result = await send_daily_cause_list(context, force=True)
 
         await update.effective_message.reply_text(
-            "✅ Test completed. Check the office group."
+            "✅ Test completed. Check the office group.\n"
+            f"Delivery result: {result}."
         )
 
     except Exception as e:
@@ -3948,6 +4020,17 @@ app.job_queue.run_daily(
     ),
     name="daily_ad_case_sync_845am"
 )
+
+app.job_queue.run_daily(
+    daily_cause_list_job,
+    time=time(
+        hour=8,
+        minute=55,
+        tzinfo=ZoneInfo("Asia/Kolkata")
+    ),
+    name="automatic_cause_list_855am"
+)
+
 
 app.job_queue.run_daily(
     morning_dashboard_job,
