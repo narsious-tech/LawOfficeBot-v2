@@ -995,15 +995,7 @@ def _load_command_centre_metrics(today):
         cur.close(); conn.close()
 
 
-def build_command_centre_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚖️ Hearings", callback_data="mcc:hearings"), InlineKeyboardButton("✅ Tasks", callback_data="mcc:tasks")],
-        [InlineKeyboardButton("👥 Staff", callback_data="mcc:staff"), InlineKeyboardButton("💰 Finance", callback_data="mcc:finance")],
-        [InlineKeyboardButton("📁 Documents", callback_data="mcc:documents"), InlineKeyboardButton("💬 Messages", callback_data="mcc:messages")],
-        [InlineKeyboardButton("🔄 Refresh", callback_data="mcc:refresh"), InlineKeyboardButton("⚙️ System", callback_data="mcc:system")],
-    ])
-
-def build_morning_dashboard():
+def build_detailed_morning_dashboard():
     """Build the Sprint 10 briefing with independently resilient data sources."""
     now = datetime.now(IST)
     today = now.date()
@@ -1156,7 +1148,7 @@ def build_morning_dashboard():
         "🌅 LAW OFFICE MORNING DASHBOARD\n"
         f"📅 {today.strftime('%d-%m-%Y')}\n"
         f"🕘 Refreshed: {now.strftime('%I:%M %p')} IST\n"
-        "🧩 Build: Sprint 10.4 Modern Command Centre\n\n"
+        "🧩 Build: Sprint 11 Full Operational Brief\n\n"
         "📡 DATA STATUS\n"
         f"{'✅' if database_live else '⚠️'} Office Database: "
         f"{'Live' if database_live else 'Unavailable'}\n"
@@ -1310,6 +1302,167 @@ def build_morning_dashboard():
     return message
 
 
+SPRINT_11_BUILD = "Sprint 11 Command OS"
+
+
+def _line_value(text, label, default="Unavailable"):
+    match = re.search(rf"^{re.escape(label)}\s*(.+)$", text, re.MULTILINE)
+    return normalize_space(match.group(1)) if match else default
+
+
+def _section(text, start_heading, end_headings=()):
+    start = text.find(start_heading)
+    if start < 0:
+        return ""
+    end = len(text)
+    for heading in end_headings:
+        pos = text.find(heading, start + len(start_heading))
+        if pos >= 0:
+            end = min(end, pos)
+    return text[start:end].strip()
+
+
+def _attention_items(detailed):
+    block = _section(
+        detailed,
+        "🚨 NEEDS ATTENTION",
+        ("⚠️ SOURCE NOTICES", "🔥 OFFICE FOCUS", "👥 STAFF-WISE WORKLOAD"),
+    )
+    items = [normalize_space(line.lstrip("• ")) for line in block.splitlines()[1:] if line.strip().startswith("•")]
+    if items:
+        return items[:4]
+    if "No critical operational exception" in block:
+        return []
+    return []
+
+
+def build_morning_dashboard():
+    """Sprint 11 compact command-centre card backed by Sprint 10 data."""
+    detailed = build_detailed_morning_dashboard()
+    now = datetime.now(IST)
+    hearings = _line_value(detailed, "⚖️ Today's Hearings:", "0")
+    overdue = _line_value(detailed, "🔴 Overdue Tasks:", "0")
+    due_today = _line_value(detailed, "🟠 Tasks Due Today:", "0")
+    pending = _line_value(detailed, "📋 Total Pending Tasks:", "0")
+    present = _line_value(detailed, "👥 Staff Present:")
+    docs = _line_value(detailed, "📂 Documents Today:")
+    messages = _line_value(detailed, "💬 Communications Pending:")
+    receipts = _line_value(detailed, "💰 Receipts Today:")
+    drive_missing = _line_value(detailed, "☁️ Cases Without Drive Folder:")
+    notifications = _line_value(detailed, "🔔 Pending Notifications:")
+    db_status = _line_value(detailed, "✅ Office Database:", "Unavailable")
+    ad_match = re.search(r"^[✅⚠️] Advocate Diaries:\s*(.+)$", detailed, re.MULTILINE)
+    ad_status = normalize_space(ad_match.group(1)) if ad_match else "Unavailable"
+    attention = _attention_items(detailed)
+
+    lines = [
+        "🏛 LAW OFFICE COMMAND CENTRE",
+        f"🌅 {now.strftime('%A, %d %B %Y')}  •  {now.strftime('%I:%M %p')} IST",
+        f"🧩 {SPRINT_11_BUILD}",
+        "",
+        "🚨 PRIORITY BOARD",
+        f"⚖️ Hearings {hearings}   🔴 Overdue {overdue}",
+        f"🟠 Due today {due_today}   📋 Pending {pending}",
+        "",
+        "📊 OFFICE PULSE",
+        f"👥 Present {present}   📂 New docs {docs}",
+        f"💬 Messages {messages}   💰 Receipts {receipts}",
+        f"☁️ Missing Drive folders {drive_missing}",
+        f"🔔 Pending notifications {notifications}",
+        "",
+        "⚙️ SYSTEM HEALTH",
+        f"🗄 Database: {db_status}",
+        f"⚖️ Advocate Diaries: {ad_status}",
+        "",
+    ]
+    if attention:
+        lines.append(f"🚨 {len(attention)} ACTION ITEM(S)")
+        lines.extend(f"• {item}" for item in attention)
+    else:
+        lines.extend(["✅ OFFICE CLEAR", "No critical operational exception detected."])
+    lines.extend(["", "Select a module or quick action below."])
+    return "\n".join(lines)
+
+
+def build_command_centre_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚨 Alerts", callback_data="mcc:alerts"), InlineKeyboardButton("⚖️ Hearings", callback_data="mcc:hearings")],
+        [InlineKeyboardButton("✅ Tasks", callback_data="mcc:tasks"), InlineKeyboardButton("👥 Staff", callback_data="mcc:staff")],
+        [InlineKeyboardButton("📂 Cases", callback_data="mcc:cases"), InlineKeyboardButton("💰 Finance", callback_data="mcc:finance")],
+        [InlineKeyboardButton("📁 Documents", callback_data="mcc:documents"), InlineKeyboardButton("💬 Clients", callback_data="mcc:messages")],
+        [InlineKeyboardButton("➕ Quick Actions", callback_data="mcc:quick"), InlineKeyboardButton("📊 Full Brief", callback_data="mcc:full")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="mcc:refresh"), InlineKeyboardButton("⚙️ System", callback_data="mcc:system")],
+    ])
+
+
+def build_back_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Command Centre", callback_data="mcc:home"), InlineKeyboardButton("🔄 Refresh", callback_data="mcc:refresh")]])
+
+
+def build_quick_actions_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ New Case", callback_data="mcc:q_newcase"), InlineKeyboardButton("📝 New Task", callback_data="mcc:q_newtask")],
+        [InlineKeyboardButton("📅 Add Hearing", callback_data="mcc:q_hearing"), InlineKeyboardButton("👤 New Client", callback_data="mcc:q_client")],
+        [InlineKeyboardButton("💰 Add Receipt", callback_data="mcc:q_receipt"), InlineKeyboardButton("📤 Upload Document", callback_data="mcc:q_upload")],
+        [InlineKeyboardButton("⬅️ Command Centre", callback_data="mcc:home")],
+    ])
+
+
+def build_module_card(action):
+    detailed = build_detailed_morning_dashboard()
+    if action == "alerts":
+        items = _attention_items(detailed)
+        body = "\n".join(f"• {x}" for x in items) if items else "✅ No critical operational exception detected."
+        return f"🚨 ALERTS & DECISIONS\n\n{body}"
+    if action == "hearings":
+        hearings = _line_value(detailed, "⚖️ Today's Hearings:", "0")
+        court = _section(detailed, "⚖️ TODAY'S COURT SCHEDULE", ("🔴 OVERDUE TASKS",)) or _section(detailed, "🚶 COURT MOVEMENT PLAN", ("🔴 OVERDUE TASKS",))
+        return f"⚖️ HEARINGS DASHBOARD\n\nToday's hearings: {hearings}\n\n{court or 'Use /todayhearings for the detailed cause list.'}"
+    if action == "tasks":
+        return "✅ TASKS DASHBOARD\n\n" + "\n".join([
+            f"🔴 Overdue: {_line_value(detailed, '🔴 Overdue Tasks:', '0')}",
+            f"🟠 Due today: {_line_value(detailed, '🟠 Tasks Due Today:', '0')}",
+            f"📋 Total pending: {_line_value(detailed, '📋 Total Pending Tasks:', '0')}",
+            f"📘 AD-linked: {_line_value(detailed, '📘 Pending AD-linked Tasks:', '0')}",
+            "", "Open: /pendingtasks", "Task: /taskdetails TASK_ID",
+        ])
+    if action == "staff":
+        section = _section(detailed, "👥 STAFF-WISE WORKLOAD", ("⚖️ TODAY'S COURT SCHEDULE", "🚶 COURT MOVEMENT PLAN", "⚖️ FLOOR-WISE CAUSE LIST"))
+        # keep Telegram card concise
+        lines = section.splitlines()
+        summary = [line for line in lines if line.startswith("👤 ") or line.startswith("📋 Pending:") or line.startswith("🔴 Overdue:")]
+        return "👥 STAFF DASHBOARD\n\n" + ("\n".join(summary[:18]) if summary else "Attendance and workload data unavailable.") + "\n\nOpen: /attendance"
+    if action == "cases":
+        return "📂 CASES DASHBOARD\n\n" + "\n".join([
+            f"☁️ Missing Drive folders: {_line_value(detailed, '☁️ Cases Without Drive Folder:')}",
+            f"📂 Documents today: {_line_value(detailed, '📂 Documents Today:')}",
+            "", "Find case: /findcase", "Create case: /newcase",
+        ])
+    if action == "finance":
+        return "💰 FINANCE DASHBOARD\n\n" + "\n".join([
+            f"Receipts today: {_line_value(detailed, '💰 Receipts Today:')}",
+            "", "Open ledger: /ledger",
+        ])
+    if action == "documents":
+        return "📁 DOCUMENT CENTRE\n\n" + "\n".join([
+            f"📂 Uploaded today: {_line_value(detailed, '📂 Documents Today:')}",
+            f"🗂 Awaiting classification: {_line_value(detailed, '🗂 Files Awaiting Classification:')}",
+            f"☁️ Cases missing Drive folder: {_line_value(detailed, '☁️ Cases Without Drive Folder:')}",
+            "", "Open: /files", "Search: /docsearch",
+        ])
+    if action == "messages":
+        return "💬 CLIENT COMMUNICATIONS\n\n" + "\n".join([
+            f"Pending: {_line_value(detailed, '💬 Communications Pending:')}",
+            f"Notifications: {_line_value(detailed, '🔔 Pending Notifications:')}",
+            "", "WhatsApp workflow: /clientwhatsapp", "Mobile queue: /mobilequeue",
+        ])
+    if action == "system":
+        db = _line_value(detailed, "✅ Office Database:", "Unavailable")
+        ad = re.search(r"^[✅⚠️] Advocate Diaries:\s*(.+)$", detailed, re.MULTILINE)
+        return "⚙️ SYSTEM HEALTH\n\n" + f"🗄 Database: {db}\n⚖️ Advocate Diaries: {normalize_space(ad.group(1)) if ad else 'Unavailable'}\n🔄 {_line_value(detailed, '🔄 Last Sync:', 'Last sync unavailable')}\n\nDiagnostics: /adstatus"
+    return "Module unavailable."
+
+
 async def send_dashboard_message(
     context,
     chat_id,
@@ -1355,19 +1508,48 @@ async def morning_dashboard_callback(update: Update, context: ContextTypes.DEFAU
         return
     await query.answer()
     action = (query.data or "").split(":", 1)[-1]
-    if action == "refresh":
-        await send_dashboard_message(context, query.message.chat_id, build_morning_dashboard(), build_command_centre_keyboard())
+
+    if action in {"home", "refresh"}:
+        await query.edit_message_text(
+            build_morning_dashboard(),
+            reply_markup=build_command_centre_keyboard(),
+            disable_web_page_preview=True,
+        )
         return
-    module_help = {
-        "hearings": "⚖️ HEARINGS\n/morningdashboard — today’s cause list\n/todayhearings — hearing list (where enabled)",
-        "tasks": "✅ TASKS\n/pendingtasks — all pending work\n/taskdetails TASK_ID — open a task\n/taskhistory STAFF pending — staff workload",
-        "staff": "👥 STAFF\n/attendance — attendance menu\n/attendancereport — attendance report\n/taskhistory STAFF pending — workload",
-        "finance": "💰 FINANCE\n/ledger — finance ledger and receipts",
-        "documents": "📁 DOCUMENTS\n/files — document centre\n/latestfiles — recent uploads\n/docsearch — search documents",
-        "messages": "💬 COMMUNICATIONS\n/clientwhatsapp — client WhatsApp workflow\n/mobilequeue — mobile update queue",
-        "system": "⚙️ SYSTEM\n/adstatus — Advocate Diaries diagnostics\n/mobileaudit — mobile audit\n/morningdashboard — system health summary",
+
+    if action == "full":
+        await send_dashboard_message(
+            context,
+            query.message.chat_id,
+            build_detailed_morning_dashboard(),
+            reply_markup=build_back_keyboard(),
+        )
+        return
+
+    if action == "quick":
+        await query.edit_message_text(
+            "➕ QUICK ACTIONS\n\nChoose the workflow to start.",
+            reply_markup=build_quick_actions_keyboard(),
+        )
+        return
+
+    quick_help = {
+        "q_newcase": "➕ NEW CASE\n\nSend /newcase to start the guided case-creation workflow.",
+        "q_newtask": "📝 NEW TASK\n\nSend /assigntask to assign a new office task.",
+        "q_hearing": "📅 ADD HEARING\n\nSend /case CASE_ID to open the case workspace and add or update its hearing.",
+        "q_client": "👤 NEW CLIENT\n\nSend /newcase to register the client and create the first case workspace.",
+        "q_receipt": "💰 ADD RECEIPT\n\nSend /addpayment to record a payment, or /ledger to review accounts.",
+        "q_upload": "📤 UPLOAD DOCUMENT\n\nSend /files to open the document centre, or attach the document in the case workspace.",
     }
-    await query.message.reply_text(module_help.get(action, "Module is not available."), disable_web_page_preview=True)
+    if action in quick_help:
+        await query.edit_message_text(quick_help[action], reply_markup=build_quick_actions_keyboard())
+        return
+
+    await query.edit_message_text(
+        build_module_card(action),
+        reply_markup=build_back_keyboard(),
+        disable_web_page_preview=True,
+    )
 
 
 async def morningdashboard(
