@@ -1,6 +1,7 @@
 import os
 import tempfile
 import hashlib
+import asyncio
 from typing import Optional, Tuple
 
 import psycopg2
@@ -15,6 +16,7 @@ from telegram import (
     InlineKeyboardMarkup,
 )
 from telegram.ext import ContextTypes, ConversationHandler
+from telegram.error import BadRequest, NetworkError, TimedOut
 from utils.drive import (
     drive_service,
     get_drive_service,
@@ -46,6 +48,69 @@ from services.document_folder_service import ensure_case_document_folders
 from services.document_version_service import build_versioned_filename, next_version_sequence
 from services.document_search_service import search_documents
 from commands.document_upload_wizard import category_keyboard, version_keyboard
+
+
+# Telegram's hosted Bot API currently permits bots to download files only up to
+# 20 MB through getFile. A self-hosted Local Bot API server can remove this
+# limit, but the standard Railway deployment uses Telegram's hosted endpoint.
+TELEGRAM_DOWNLOAD_LIMIT_BYTES = int(
+    os.getenv("TELEGRAM_DOWNLOAD_LIMIT_BYTES", str(20 * 1024 * 1024))
+)
+DOWNLOAD_RETRY_ATTEMPTS = max(1, int(os.getenv("TELEGRAM_DOWNLOAD_RETRY_ATTEMPTS", "3")))
+
+
+def format_file_size(size_bytes: Optional[int]) -> str:
+    if size_bytes is None:
+        return "Unknown"
+    size = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size_bytes} B"
+
+
+def case_drive_folder_url(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+    folder_id = context.user_data.get("upload_case_folder_id")
+    if not folder_id:
+        return None
+    return f"https://drive.google.com/drive/folders/{folder_id}"
+
+
+async def download_telegram_file_with_retry(tg_file, local_path: str) -> None:
+    last_error = None
+    for attempt in range(1, DOWNLOAD_RETRY_ATTEMPTS + 1):
+        try:
+            await tg_file.download_to_drive(local_path)
+            return
+        except (TimedOut, NetworkError) as exc:
+            last_error = exc
+            if attempt >= DOWNLOAD_RETRY_ATTEMPTS:
+                raise
+            await asyncio.sleep(min(2 ** (attempt - 1), 4))
+    if last_error:
+        raise last_error
+
+
+async def reply_file_too_large(update: Update, context: ContextTypes.DEFAULT_TYPE, size_bytes: Optional[int]) -> None:
+    drive_url = case_drive_folder_url(context)
+    keyboard = None
+    if drive_url:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("☁️ Upload directly to Google Drive", url=drive_url)
+        ]])
+    await update.effective_message.reply_text(
+        "⚠️ FILE EXCEEDS TELEGRAM BOT DOWNLOAD LIMIT\n\n"
+        f"File size: {format_file_size(size_bytes)}\n"
+        f"Hosted Bot API limit: {format_file_size(TELEGRAM_DOWNLOAD_LIMIT_BYTES)}\n\n"
+        "Telegram delivered the message to the bot, but its hosted Bot API "
+        "will not allow the bot to download this file. The file has not been "
+        "uploaded to Google Drive and no database entry was created.\n\n"
+        "Please compress/split the file below 20 MB, or use the Google Drive "
+        "button and upload it directly into this case folder.",
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
 
 ROOT_FOLDER_ID = os.getenv(
     "ROOT_FOLDER_ID",
@@ -822,7 +887,18 @@ async def upload_file(
     telegram_file_unique_id = None
 
     if document:
-        tg_file = await document.get_file()
+        reported_size = getattr(document, "file_size", None)
+        if reported_size and reported_size > TELEGRAM_DOWNLOAD_LIMIT_BYTES:
+            await reply_file_too_large(update, context, reported_size)
+            return WAITING_FILE
+
+        try:
+            tg_file = await document.get_file()
+        except BadRequest as exc:
+            if "file is too big" in str(exc).lower():
+                await reply_file_too_large(update, context, reported_size)
+                return WAITING_FILE
+            raise
 
         filename = (
             document.file_name
@@ -839,7 +915,18 @@ async def upload_file(
         )
 
     elif photo:
-        tg_file = await photo.get_file()
+        reported_size = getattr(photo, "file_size", None)
+        if reported_size and reported_size > TELEGRAM_DOWNLOAD_LIMIT_BYTES:
+            await reply_file_too_large(update, context, reported_size)
+            return WAITING_FILE
+
+        try:
+            tg_file = await photo.get_file()
+        except BadRequest as exc:
+            if "file is too big" in str(exc).lower():
+                await reply_file_too_large(update, context, reported_size)
+                return WAITING_FILE
+            raise
 
         filename = (
             f"{case_id}_photo.jpg"
@@ -871,10 +958,19 @@ async def upload_file(
     local_path = temp_handle.name
     temp_handle.close()
 
+    progress_message = await update.effective_message.reply_text(
+        "⏳ Downloading the document securely from Telegram..."
+    )
+
     try:
-        await tg_file.download_to_drive(
-            local_path
-        )
+        await download_telegram_file_with_retry(tg_file, local_path)
+
+        try:
+            await progress_message.edit_text(
+                "☁️ Telegram download complete. Uploading to Google Drive..."
+            )
+        except Exception:
+            pass
 
         file_size = os.path.getsize(
             local_path
@@ -1064,15 +1160,36 @@ async def upload_file(
             )
         )
 
-    except Exception as exc:
+    except BadRequest as exc:
         delete_temp_file(local_path)
-
+        if "file is too big" in str(exc).lower():
+            await reply_file_too_large(
+                update, context,
+                getattr(document or photo, "file_size", None),
+            )
+            return WAITING_FILE
         await update.effective_message.reply_text(
-            "❌ Upload processing failed:\n"
+            "❌ Telegram rejected the document download.\n"
             f"{type(exc).__name__}: {exc}"
         )
+        return WAITING_FILE
 
-        return ConversationHandler.END
+    except (TimedOut, NetworkError) as exc:
+        delete_temp_file(local_path)
+        await update.effective_message.reply_text(
+            "❌ The Telegram download failed after automatic retries.\n\n"
+            "Please send the same file again. Your upload session is still active.\n"
+            f"Technical detail: {type(exc).__name__}: {exc}"
+        )
+        return WAITING_FILE
+
+    except Exception as exc:
+        delete_temp_file(local_path)
+        await update.effective_message.reply_text(
+            "❌ Upload processing failed. No Google Drive or database record was created.\n"
+            f"{type(exc).__name__}: {exc}"
+        )
+        return WAITING_FILE
 
 async def duplicate_upload_callback(
     update: Update,
