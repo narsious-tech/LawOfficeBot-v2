@@ -36,12 +36,15 @@ def build_dashboard_text(update: Update) -> str:
         f"📅 Hearings Today        <b>{display_count(summary.hearings_today)}</b>\n"
         f"📆 Appointments Today    <b>{display_count(summary.appointments_today)}</b>\n\n"
         f"📋 Pending Works         <b>{display_count(summary.pending_works)}</b>\n"
-        f"✅ Pending Tasks         <b>{display_count(summary.pending_tasks)}</b>\n\n"
+        f"✅ Pending Tasks         <b>{display_count(summary.pending_tasks)}</b>\n"
+        f"🔴 Urgent Tasks          <b>{display_count(summary.urgent_tasks)}</b>\n"
+        f"⏰ Overdue / Due Today   <b>{display_count(summary.overdue_tasks)} / {display_count(summary.tasks_due_today)}</b>\n\n"
         "👥 Staff Present         "
         f"<b>{display_attendance(summary.staff_present, summary.staff_total)}</b>\n\n"
         f"📂 Documents Today       <b>{display_count(summary.documents_today)}</b>\n"
         f"🔔 Notifications         <b>{display_count(summary.notifications)}</b>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Use <b>/morningdashboard</b> for the complete court and staff briefing.\n\n"
         "Select an office module below."
     )
 
