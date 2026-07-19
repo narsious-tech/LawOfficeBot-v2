@@ -112,6 +112,7 @@ from commands.files import (
     filehistory,
     openfile,
     findfile,
+    docsearch,
 )
 
 from commands.ad_sync_v2 import (
@@ -3628,6 +3629,8 @@ app.add_handler(
         findfile
     )
 )
+
+app.add_handler(CommandHandler("docsearch", docsearch))
 
 app.add_handler(
     CommandHandler(
