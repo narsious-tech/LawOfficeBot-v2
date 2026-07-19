@@ -10,6 +10,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from services.case_timeline_service import get_case_timeline, render_timeline
+from services.case_document_service import document_counts, list_case_documents, render_document_list
 from services.case_workspace_service import (
     CaseSummary,
     get_case,
@@ -237,12 +238,56 @@ async def case_workspace_callback(update: Update, context: ContextTypes.DEFAULT_
         else:
             text = "✅ <b>CASE TASKS</b>\n\nNo linked tasks found."
     elif action == "documents":
-        link = case.drive_folder_link
-        text = "📂 <b>CASE DOCUMENTS</b>\n\n"
-        if link != "-":
-            text += f"Google Drive folder:\n{esc(link)}"
-        else:
-            text += "No Google Drive folder is recorded for this case."
+        counts = document_counts(case)
+        identifier = case.case_number if case.case_number != "-" else case.case_id
+        text = (
+            "📂 <b>CASE DOCUMENTS</b>\n\n"
+            f"🆔 <b>{esc(identifier)}</b>\n"
+            f"📄 Total indexed files: <b>{counts.get('TOTAL', 0)}</b>\n\n"
+            f"📝 Pleadings: {counts.get('PLEADINGS', 0)}\n"
+            f"⚖️ Orders: {counts.get('ORDERS', 0)}\n"
+            f"🧾 Evidence: {counts.get('EVIDENCE', 0)}\n"
+            f"📚 Judgments: {counts.get('JUDGMENTS', 0)}\n"
+            f"✉️ Correspondence: {counts.get('CORRESPONDENCE', 0)}\n"
+            f"📎 Miscellaneous: {counts.get('MISCELLANEOUS', 0)}\n\n"
+            f"Upload: <code>/upload {esc(identifier)}</code>\n"
+            f"Full list: <code>/files {esc(identifier)}</code>"
+        )
+        rows = [
+            [
+                InlineKeyboardButton("📄 All Files", callback_data=f"casews:doclist:{db_id}"),
+                InlineKeyboardButton("📝 Pleadings", callback_data=f"casews:doccat_PLEADINGS:{db_id}"),
+            ],
+            [
+                InlineKeyboardButton("⚖️ Orders", callback_data=f"casews:doccat_ORDERS:{db_id}"),
+                InlineKeyboardButton("🧾 Evidence", callback_data=f"casews:doccat_EVIDENCE:{db_id}"),
+            ],
+            [
+                InlineKeyboardButton("📚 Judgments", callback_data=f"casews:doccat_JUDGMENTS:{db_id}"),
+                InlineKeyboardButton("📎 Other", callback_data=f"casews:doccat_MISCELLANEOUS:{db_id}"),
+            ],
+        ]
+        if case.drive_folder_link != "-":
+            rows.append([InlineKeyboardButton("☁️ Open Google Drive Folder", url=case.drive_folder_link)])
+        rows.extend([
+            [InlineKeyboardButton("⬅️ Case Workspace", callback_data=f"casews:open:{db_id}")],
+            [InlineKeyboardButton("🏠 Dashboard", callback_data="casews:dashboard")],
+        ])
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(rows),
+            disable_web_page_preview=True,
+        )
+        return
+    elif action == "doclist":
+        documents = list_case_documents(case, limit=20)
+        text = render_document_list(case, documents, "RECENT CASE DOCUMENTS")
+    elif action.startswith("doccat_"):
+        category = action.removeprefix("doccat_")
+        documents = list_case_documents(case, category=category, limit=20)
+        heading = f"{category.replace('_', ' ').title()} DOCUMENTS"
+        text = render_document_list(case, documents, heading)
     elif action == "fees":
         entries = get_fee_installments(case)
         text = (
