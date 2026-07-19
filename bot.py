@@ -167,7 +167,7 @@ from commands.mobile_update_queue import (
     mobileupdatequeuesummary,
 )
 
-from commands.live_hearings import livehearings, live_hearing_callback
+from commands.live_hearings import livehearings, live_hearing_callback, hearing_completion_handler
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -3631,6 +3631,7 @@ app.add_handler(CommandHandler("case", case))
 app.add_handler(CommandHandler("pendingcases", pendingcases))
 app.add_handler(CommandHandler("todayhearings", todayhearings))
 app.add_handler(CommandHandler("livehearings", livehearings))
+app.add_handler(hearing_completion_handler())
 app.add_handler(CallbackQueryHandler(live_hearing_callback, pattern=r"^lhc:"))
 app.add_handler(CommandHandler("tomorrowcause", tomorrowcause))
 app.add_handler(
