@@ -882,6 +882,127 @@ def _load_morning_dashboard_database(today):
         conn.close()
 
 
+
+def _safe_number(value):
+    try:
+        if value is None or value == "":
+            return 0.0
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _load_command_centre_metrics(today):
+    """Load optional Sprint 10.4 modules without requiring a new migration."""
+    metrics = {
+        "staff_present": None, "staff_total": None, "staff_not_checked_in": None,
+        "documents_today": None, "unclassified_documents": None,
+        "cases_without_drive": None, "receipts_today": None,
+        "pending_messages": None, "failed_messages": None,
+        "pending_notifications": None, "last_sync": None, "sync_status": None,
+    }
+    warnings = []
+    conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+    cur = conn.cursor()
+    try:
+        tables = {}
+        cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
+        available = {r[0] for r in cur.fetchall()}
+
+        if "staff_accounts" in available:
+            cur.execute("SELECT COUNT(*) FROM staff_accounts WHERE COALESCE(is_active, TRUE)=TRUE")
+            metrics["staff_total"] = int(cur.fetchone()[0])
+        elif "staff" in available:
+            cur.execute("SELECT COUNT(*) FROM staff")
+            metrics["staff_total"] = int(cur.fetchone()[0])
+
+        if "attendance_sessions" in available:
+            cur.execute("""
+                SELECT COUNT(DISTINCT telegram_user_id)
+                FROM attendance_sessions
+                WHERE attendance_date=%s AND checkin_time IS NOT NULL
+                  AND checkout_time IS NULL
+                  AND COALESCE(UPPER(status),'OPEN') <> 'CANCELLED'
+            """, (today,))
+            metrics["staff_present"] = int(cur.fetchone()[0])
+            if metrics["staff_total"] is not None:
+                metrics["staff_not_checked_in"] = max(metrics["staff_total"] - metrics["staff_present"], 0)
+
+        if "case_files" in available:
+            columns = _dashboard_table_columns(cur, "case_files")
+            date_col = "uploaded_at" if "uploaded_at" in columns else None
+            if date_col:
+                cur.execute(f"SELECT COUNT(*) FROM case_files WHERE {date_col}::date=%s", (today,))
+                metrics["documents_today"] = int(cur.fetchone()[0])
+            if "category" in columns:
+                cur.execute("""
+                    SELECT COUNT(*) FROM case_files
+                    WHERE category IS NULL OR TRIM(category)='' OR UPPER(category)='MISCELLANEOUS'
+                """)
+                metrics["unclassified_documents"] = int(cur.fetchone()[0])
+
+        if "cases" in available:
+            columns = _dashboard_table_columns(cur, "cases")
+            if "drive_folder_id" in columns:
+                status_clause = ""
+                if "status" in columns:
+                    status_clause = " AND COALESCE(UPPER(status),'OPEN') NOT IN ('CLOSED','DISPOSED','ARCHIVED')"
+                cur.execute("SELECT COUNT(*) FROM cases WHERE (drive_folder_id IS NULL OR TRIM(drive_folder_id)='')" + status_clause)
+                metrics["cases_without_drive"] = int(cur.fetchone()[0])
+
+        if "fee_installments" in available:
+            columns = _dashboard_table_columns(cur, "fee_installments")
+            if "amount" in columns and "date" in columns:
+                cur.execute("SELECT amount FROM fee_installments WHERE date::text LIKE %s OR date::text LIKE %s", (today.strftime('%Y-%m-%d')+'%', today.strftime('%d-%m-%Y')+'%'))
+                metrics["receipts_today"] = sum(_safe_number(r[0]) for r in cur.fetchall())
+
+        if "client_messages" in available:
+            columns = _dashboard_table_columns(cur, "client_messages")
+            if "delivery_status" in columns:
+                cur.execute("""
+                    SELECT
+                      COUNT(*) FILTER (WHERE COALESCE(UPPER(delivery_status),'DRAFT') IN ('DRAFT','PENDING','QUEUED','READY')),
+                      COUNT(*) FILTER (WHERE COALESCE(UPPER(delivery_status),'') IN ('FAILED','ERROR','REJECTED'))
+                    FROM client_messages
+                """)
+                pending, failed = cur.fetchone()
+                metrics["pending_messages"] = int(pending or 0)
+                metrics["failed_messages"] = int(failed or 0)
+
+        if "attendance_notifications" in available:
+            columns = _dashboard_table_columns(cur, "attendance_notifications")
+            if "approval_status" in columns:
+                cur.execute("""
+                    SELECT COUNT(*) FROM attendance_notifications
+                    WHERE COALESCE(UPPER(approval_status),'PENDING') NOT IN ('APPROVED','ACCEPTED','CLOSED')
+                """)
+                metrics["pending_notifications"] = int(cur.fetchone()[0])
+
+        if "sync_logs" in available:
+            columns = _dashboard_table_columns(cur, "sync_logs")
+            order_col = "created_at" if "created_at" in columns else "id"
+            select_status = "status" if "status" in columns else "NULL"
+            select_time = "created_at" if "created_at" in columns else "NULL"
+            cur.execute(f"SELECT {select_status}, {select_time} FROM sync_logs ORDER BY {order_col} DESC NULLS LAST LIMIT 1")
+            row = cur.fetchone()
+            if row:
+                metrics["sync_status"], metrics["last_sync"] = row
+        return metrics, warnings
+    except Exception as exc:
+        warnings.append(f"Command-centre modules partially unavailable: {type(exc).__name__}: {normalize_space(str(exc))[:180]}")
+        return metrics, warnings
+    finally:
+        cur.close(); conn.close()
+
+
+def build_command_centre_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚖️ Hearings", callback_data="mcc:hearings"), InlineKeyboardButton("✅ Tasks", callback_data="mcc:tasks")],
+        [InlineKeyboardButton("👥 Staff", callback_data="mcc:staff"), InlineKeyboardButton("💰 Finance", callback_data="mcc:finance")],
+        [InlineKeyboardButton("📁 Documents", callback_data="mcc:documents"), InlineKeyboardButton("💬 Messages", callback_data="mcc:messages")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="mcc:refresh"), InlineKeyboardButton("⚙️ System", callback_data="mcc:system")],
+    ])
+
 def build_morning_dashboard():
     """Build the Sprint 10 briefing with independently resilient data sources."""
     now = datetime.now(IST)
@@ -904,6 +1025,9 @@ def build_morning_dashboard():
         source_warnings.append(
             f"Office database unavailable ({type(exc).__name__}); task and case figures were omitted."
         )
+
+    command_metrics, command_warnings = _load_command_centre_metrics(today) if database_live else ({}, [])
+    source_warnings.extend(command_warnings)
 
     case_lookup = {}
     for (
@@ -1032,7 +1156,7 @@ def build_morning_dashboard():
         "🌅 LAW OFFICE MORNING DASHBOARD\n"
         f"📅 {today.strftime('%d-%m-%Y')}\n"
         f"🕘 Refreshed: {now.strftime('%I:%M %p')} IST\n"
-        "🧩 Build: Sprint 10.3 Empty-State Fix\n\n"
+        "🧩 Build: Sprint 10.4 Modern Command Centre\n\n"
         "📡 DATA STATUS\n"
         f"{'✅' if database_live else '⚠️'} Office Database: "
         f"{'Live' if database_live else 'Unavailable'}\n"
@@ -1052,6 +1176,41 @@ def build_morning_dashboard():
             f"🔵 Normal: {office_priority_counts['NORMAL']}\n"
             f"⚪ Low: {office_priority_counts['LOW']}\n\n"
         )
+
+    # Sprint 10.4 executive office pulse.
+    if database_live:
+        present = command_metrics.get("staff_present")
+        total_staff = command_metrics.get("staff_total")
+        attendance_text = "Unavailable" if present is None else f"{present}/{total_staff if total_staff is not None else '?'}"
+        receipts = command_metrics.get("receipts_today")
+        receipts_text = "Unavailable" if receipts is None else f"₹{receipts:,.0f}"
+        message += (
+            "🏢 OFFICE PULSE\n"
+            f"👥 Staff Present: {attendance_text}\n"
+            f"📂 Documents Today: {command_metrics.get('documents_today') if command_metrics.get('documents_today') is not None else 'Unavailable'}\n"
+            f"💬 Communications Pending: {command_metrics.get('pending_messages') if command_metrics.get('pending_messages') is not None else 'Unavailable'}\n"
+            f"💰 Receipts Today: {receipts_text}\n\n"
+            "📁 DOCUMENTS & SYSTEMS\n"
+            f"🗂 Files Awaiting Classification: {command_metrics.get('unclassified_documents') if command_metrics.get('unclassified_documents') is not None else 'Unavailable'}\n"
+            f"☁️ Cases Without Drive Folder: {command_metrics.get('cases_without_drive') if command_metrics.get('cases_without_drive') is not None else 'Unavailable'}\n"
+            f"🔔 Pending Notifications: {command_metrics.get('pending_notifications') if command_metrics.get('pending_notifications') is not None else 'Unavailable'}\n"
+        )
+        last_sync = command_metrics.get("last_sync")
+        sync_status = command_metrics.get("sync_status")
+        if last_sync or sync_status:
+            if isinstance(last_sync, datetime):
+                last_sync = last_sync.strftime("%d-%m-%Y %I:%M %p")
+            message += f"🔄 Last Sync: {last_sync or 'Unknown'} ({sync_status or 'Unknown'})\n"
+        message += "\n"
+
+        risks = []
+        if overdue_tasks: risks.append(f"{len(overdue_tasks)} overdue task(s) require action")
+        if command_metrics.get("staff_not_checked_in"): risks.append(f"{command_metrics['staff_not_checked_in']} staff member(s) not checked in")
+        if command_metrics.get("failed_messages"): risks.append(f"{command_metrics['failed_messages']} failed client communication(s)")
+        if command_metrics.get("cases_without_drive"): risks.append(f"{command_metrics['cases_without_drive']} active case(s) missing Drive folders")
+        if command_metrics.get("unclassified_documents"): risks.append(f"{command_metrics['unclassified_documents']} document(s) need classification")
+        message += "🚨 NEEDS ATTENTION\n"
+        message += ("\n".join(f"• {risk}" for risk in risks) if risks else "✅ No critical operational exception detected.") + "\n\n"
 
     if source_warnings:
         message += "⚠️ SOURCE NOTICES\n" + "\n".join(
@@ -1145,10 +1304,8 @@ def build_morning_dashboard():
             message += "No tasks are due today.\n\n"
 
     message += (
-        "Commands:\n"
-        "/pendingtasks — all pending tasks\n"
-        "/taskdetails TASK_ID — task details\n"
-        "/taskhistory STAFF pending — staff workload"
+        "🎛 COMMAND CENTRE\n"
+        "Use the buttons below to open a module or refresh this briefing."
     )
     return message
 
@@ -1156,10 +1313,12 @@ def build_morning_dashboard():
 async def send_dashboard_message(
     context,
     chat_id,
-    message
+    message,
+    reply_markup=None
 ):
     max_length = 3800
 
+    first_chunk = True
     while message:
         if len(message) <= max_length:
             chunk = message
@@ -1184,8 +1343,31 @@ async def send_dashboard_message(
         await context.bot.send_message(
             chat_id=chat_id,
             text=chunk,
-            disable_web_page_preview=True
+            disable_web_page_preview=True,
+            reply_markup=reply_markup if first_chunk else None
         )
+        first_chunk = False
+
+
+async def morning_dashboard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    action = (query.data or "").split(":", 1)[-1]
+    if action == "refresh":
+        await send_dashboard_message(context, query.message.chat_id, build_morning_dashboard(), build_command_centre_keyboard())
+        return
+    module_help = {
+        "hearings": "⚖️ HEARINGS\n/morningdashboard — today’s cause list\n/todayhearings — hearing list (where enabled)",
+        "tasks": "✅ TASKS\n/pendingtasks — all pending work\n/taskdetails TASK_ID — open a task\n/taskhistory STAFF pending — staff workload",
+        "staff": "👥 STAFF\n/attendance — attendance menu\n/attendancereport — attendance report\n/taskhistory STAFF pending — workload",
+        "finance": "💰 FINANCE\n/ledger — finance ledger and receipts",
+        "documents": "📁 DOCUMENTS\n/files — document centre\n/latestfiles — recent uploads\n/docsearch — search documents",
+        "messages": "💬 COMMUNICATIONS\n/clientwhatsapp — client WhatsApp workflow\n/mobilequeue — mobile update queue",
+        "system": "⚙️ SYSTEM\n/adstatus — Advocate Diaries diagnostics\n/mobileaudit — mobile audit\n/morningdashboard — system health summary",
+    }
+    await query.message.reply_text(module_help.get(action, "Module is not available."), disable_web_page_preview=True)
 
 
 async def morningdashboard(
@@ -1198,7 +1380,8 @@ async def morningdashboard(
         await send_dashboard_message(
             context,
             update.effective_chat.id,
-            message
+            message,
+            reply_markup=build_command_centre_keyboard()
         )
 
     except Exception as e:
@@ -1222,7 +1405,8 @@ async def morning_dashboard_job(context):
         await send_dashboard_message(
             context,
             int(OFFICE_GROUP_CHAT_ID),
-            message
+            message,
+            reply_markup=build_command_centre_keyboard()
         )
 
         print(
