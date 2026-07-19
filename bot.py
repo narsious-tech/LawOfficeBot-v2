@@ -92,6 +92,7 @@ from config import DATABASE_URL
 from advocate_web import AdvocateWeb
 from commands.dashboard import (
     morningdashboard,
+    morning_dashboard_callback,
     morning_dashboard_job,
     staff_morning_brief_job,
     test_staff_morning_briefs
@@ -3709,6 +3710,13 @@ app.add_handler(
     CommandHandler(
         "morningdashboard",
         morningdashboard
+    )
+)
+
+app.add_handler(
+    CallbackQueryHandler(
+        morning_dashboard_callback,
+        pattern=r"^mcc:"
     )
 )
 
