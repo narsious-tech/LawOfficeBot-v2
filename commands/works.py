@@ -5,6 +5,7 @@ import psycopg2
 from datetime import datetime
 from config import DATABASE_URL
 from advocate_web import AdvocateWeb
+from services.ad_work_service import fetch_works
 from services.activity_logger import (
     log_activity,
     log_activity_with_cursor,
@@ -61,111 +62,64 @@ async def send_long_reply(update, message):
 
 async def works(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = "pending"
-
     if context.args:
-        status = context.args[0].lower()
+        requested = context.args[0].strip().lower()
+        if requested in {"pending", "completed"}:
+            status = requested
 
-    response = web.works(status)
-
-    if response.status_code != 200:
+    records, status_code = fetch_works(web, status)
+    if status_code != 200:
         await update.effective_message.reply_text(
-            f"❌ Unable to fetch works. Status: {response.status_code}"
+            f"❌ Unable to fetch works. Status: {status_code}"
         )
         return
 
-    soup = BeautifulSoup(response.text, "lxml")
-    tbody = soup.find("tbody")
-
-    if tbody is None:
-        await update.effective_message.reply_text(
-            f"📋 Works - {status.title()}\n\nNo works found."
-        )
-        return
-
-    rows = tbody.find_all("tr")
     context.user_data["works_map"] = {}
-
     message = f"📋 WORKS - {status.upper()}\n\n"
 
-    for i, row in enumerate(rows, start=1):
-        cols = row.find_all("td")
-
-        if len(cols) < 3:
-            continue
-
-        client = cols[0].get_text(" ", strip=True)
-        case_details = cols[1].get_text("\n", strip=True)
-        description = cols[2].get_text(" ", strip=True)
-
-        case_lines = case_details.split("\n")
-
-        case_title = ""
-        case_type = ""
-        case_number = ""
-        next_hearing = ""
-
-        for idx, line in enumerate(case_lines):
-            line = line.strip()
-
-            if line.startswith("Case Title:"):
-                case_title = line.replace("Case Title:", "").strip()
-
-            elif line.startswith("Case Type:"):
-                case_type = line.replace("Case Type:", "").strip()
-
-            elif line.startswith("Case Number:"):
-                case_number = line.replace("Case Number:", "").strip()
-
-            elif line.startswith("Next Hearing:"):
-                if idx + 1 < len(case_lines):
-                    next_hearing = case_lines[idx + 1].strip()
-        complete_link = row.find(
-            "a",
-            href=lambda href: href and "mark_as_complete" in href
+    if not records:
+        await update.effective_message.reply_text(
+            message + "No works found."
         )
+        return
 
-        work_id = None
-
-        if complete_link:
-            href = complete_link.get("href", "")
-
-            if "work=" in href:
-                work_id = href.split("work=")[1].split("&")[0]
-
-        short_case = case_details.split("\n")[0]
-
+    for index, record in enumerate(records, start=1):
+        short_case = (
+            record.case_details.split("\n")[0]
+            if record.case_details
+            else record.case_title
+        )
         full_item = (
-            f"📋 Work #{i}\n\n"
-            f"👤 Client: {client}\n\n"
-            f"⚖️ {case_details}\n\n"
-            f"📝 Work: {description}"
+            f"📋 Work #{index}\n\n"
+            f"🔗 Advocate Diaries Work ID: {record.work_id or '-'}\n"
+            f"👤 Client: {record.client}\n\n"
+            f"⚖️ {record.case_details}\n\n"
+            f"📝 Work: {record.description}"
         )
-
-        context.user_data["works_map"][str(i)] = {
+        context.user_data["works_map"][str(index)] = {
             "details": full_item,
-            "work_id": work_id,
-            "client": client,
-            "case_title": case_title,
-            "case_type": case_type,
-            "case_number": case_number,
-            "next_hearing": next_hearing,
-            "work_description": description
+            "work_id": record.work_id,
+            "client": record.client,
+            "case_title": record.case_title,
+            "case_type": record.case_type,
+            "case_number": record.case_number,
+            "next_hearing": record.next_hearing,
+            "work_description": record.description,
         }
         message += (
-            f"{i}. 👤 {client}\n"
+            f"{index}. 👤 {record.client}\n"
             f"⚖️ {short_case}\n"
-            f"📝 {description}\n\n"
+            f"📝 {record.description}\n"
+            f"🔗 ID: {record.work_id or '-'}\n\n"
         )
 
     message += (
+        f"Total unique Works: {len(records)}\n\n"
         "For full details: /work number\n"
-        "To complete: /completework number"
+        "Assign to staff: /assignwork STAFF number...\n"
+        "To complete directly: /completework number"
     )
-
-    if len(message) > 3900:
-        message = message[:3850] + "\n\n⚠️ List truncated. Use /work number."
-
-    await update.effective_message.reply_text(message)
+    await send_long_reply(update, message)
 
 
 async def work(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -330,15 +284,14 @@ async def assignwork(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Prevent duplicate active assignment of same AD Work
             cur.execute("""
-                SELECT id
+                SELECT id, assigned_to
                 FROM tasks
                 WHERE source_type = 'advocate_diaries_work'
                 AND source_work_id = %s
-                AND LOWER(assigned_to) = LOWER(%s)
                 AND UPPER(status) = 'PENDING'
+                LIMIT 1
             """, (
                 str(work_id) if work_id is not None else None,
-                staff_name
             ))
 
             existing = cur.fetchone()
