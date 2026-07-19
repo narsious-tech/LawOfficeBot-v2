@@ -157,6 +157,8 @@ from commands.mobile_audit import (
     mobileaudit,
 )
 
+
+from commands.finance_ledger import register_ledger_handlers
 from commands.mobile_update_queue import (
     mobileupdatequeue,
     mobileupdatequeuesummary,
@@ -3881,6 +3883,9 @@ app.add_handler(
         mobileupdatequeuesummary
     )
 )
+
+# Sprint 8 private ledger handlers
+register_ledger_handlers(app)
 
 app.job_queue.run_repeating(
     monitor_attendance_job,
