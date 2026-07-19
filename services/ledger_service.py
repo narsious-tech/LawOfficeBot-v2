@@ -1,9 +1,9 @@
-"""Restricted financial ledger service for LawOfficeBot v3 Sprint 8."""
+"""Restricted financial ledger and cash-box service for LawOfficeBot v3 Sprint 9."""
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -51,24 +51,20 @@ def ensure_ledger_schema() -> None:
                 is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
                 deleted_at TIMESTAMPTZ,
                 deleted_by_telegram_id BIGINT,
-                CONSTRAINT financial_ledger_type_chk
-                    CHECK (entry_type IN ('INCOME', 'EXPENSE')),
-                CONSTRAINT financial_ledger_scope_chk
-                    CHECK (scope IN ('PERSONAL', 'PROFESSIONAL', 'STAFF'))
+                CONSTRAINT financial_ledger_type_chk CHECK (entry_type IN ('INCOME', 'EXPENSE')),
+                CONSTRAINT financial_ledger_scope_chk CHECK (scope IN ('PERSONAL', 'PROFESSIONAL', 'STAFF'))
             )
         """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_financial_ledger_date
-            ON financial_ledger(entry_date DESC)
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_financial_ledger_case
-            ON financial_ledger(case_number)
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_financial_ledger_active
-            ON financial_ledger(is_deleted, entry_date DESC)
-        """)
+        # Safe upgrades for databases created by earlier Sprint 8 builds.
+        cur.execute("ALTER TABLE financial_ledger ADD COLUMN IF NOT EXISTS payment_mode VARCHAR(30)")
+        cur.execute("ALTER TABLE financial_ledger ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
+        cur.execute("ALTER TABLE financial_ledger ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE")
+        cur.execute("ALTER TABLE financial_ledger ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
+        cur.execute("ALTER TABLE financial_ledger ADD COLUMN IF NOT EXISTS deleted_by_telegram_id BIGINT")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_financial_ledger_date ON financial_ledger(entry_date DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_financial_ledger_case ON financial_ledger(case_number)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_financial_ledger_active ON financial_ledger(is_deleted, entry_date DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_financial_ledger_payment_mode ON financial_ledger(payment_mode, entry_date DESC)")
         conn.commit()
     finally:
         cur.close()
@@ -85,10 +81,8 @@ def check_access(telegram_user_id: int) -> LedgerAccess:
         cur.execute("""
             SELECT staff_name
             FROM staff_accounts
-            WHERE telegram_user_id = %s
-              AND is_active = TRUE
-            ORDER BY id DESC
-            LIMIT 1
+            WHERE telegram_user_id = %s AND is_active = TRUE
+            ORDER BY id DESC LIMIT 1
         """, (telegram_user_id,))
         row = cur.fetchone()
     finally:
@@ -97,7 +91,6 @@ def check_access(telegram_user_id: int) -> LedgerAccess:
 
     if not row:
         return LedgerAccess(False, "", "Telegram account is not linked to active staff.")
-
     name = str(row[0] or "").strip()
     if name.casefold() in ALLOWED_STAFF_NAMES:
         return LedgerAccess(True, name)
@@ -150,10 +143,8 @@ def soft_delete_entry(entry_id: int, actor_id: int) -> bool:
     try:
         cur.execute("""
             UPDATE financial_ledger
-            SET is_deleted = TRUE,
-                deleted_at = NOW(),
-                deleted_by_telegram_id = %s,
-                updated_at = NOW()
+            SET is_deleted = TRUE, deleted_at = NOW(),
+                deleted_by_telegram_id = %s, updated_at = NOW()
             WHERE id = %s AND is_deleted = FALSE
         """, (actor_id, entry_id))
         changed = cur.rowcount == 1
@@ -182,11 +173,13 @@ def ledger_summary(start_date: date, end_date: date, case_number: str | None = N
                 COALESCE(SUM(amount) FILTER (WHERE entry_type='EXPENSE' AND scope='PERSONAL'),0) AS personal_expense,
                 COALESCE(SUM(amount) FILTER (WHERE entry_type='EXPENSE' AND scope='PROFESSIONAL'),0) AS professional_expense,
                 COALESCE(SUM(amount) FILTER (WHERE entry_type='EXPENSE' AND scope='STAFF'),0) AS staff_expense,
+                COALESCE(SUM(amount) FILTER (WHERE entry_type='INCOME' AND UPPER(COALESCE(payment_mode,'CASH'))='CASH'),0) AS cash_income,
+                COALESCE(SUM(amount) FILTER (WHERE entry_type='EXPENSE' AND UPPER(COALESCE(payment_mode,'CASH'))='CASH'),0) AS cash_expense,
+                COALESCE(SUM(amount) FILTER (WHERE entry_type='INCOME' AND UPPER(COALESCE(payment_mode,'')) IN ('BANK','UPI')),0) AS bank_income,
+                COALESCE(SUM(amount) FILTER (WHERE entry_type='EXPENSE' AND UPPER(COALESCE(payment_mode,'')) IN ('BANK','UPI')),0) AS bank_expense,
                 COUNT(*) AS entries
             FROM financial_ledger
-            WHERE is_deleted = FALSE
-              AND entry_date BETWEEN %s AND %s
-              {case_sql}
+            WHERE is_deleted = FALSE AND entry_date BETWEEN %s AND %s {case_sql}
         """, params)
         summary = dict(cur.fetchone() or {})
         cur.execute(f"""
@@ -194,14 +187,39 @@ def ledger_summary(start_date: date, end_date: date, case_number: str | None = N
                    description, case_number, staff_name, payment_mode,
                    created_by_name, created_at
             FROM financial_ledger
-            WHERE is_deleted = FALSE
-              AND entry_date BETWEEN %s AND %s
-              {case_sql}
-            ORDER BY entry_date DESC, id DESC
-            LIMIT 30
+            WHERE is_deleted = FALSE AND entry_date BETWEEN %s AND %s {case_sql}
+            ORDER BY entry_date DESC, id DESC LIMIT 40
         """, params)
         summary["rows"] = [dict(row) for row in cur.fetchall()]
         return summary
+    finally:
+        cur.close()
+        conn.close()
+
+
+def cash_box_balance(as_of: date | None = None) -> dict[str, Decimal]:
+    """Return ledger-derived balances. These are bookkeeping balances, not live bank API balances."""
+    ensure_ledger_schema()
+    end = as_of or date.today()
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT
+              COALESCE(SUM(CASE WHEN entry_type='INCOME' AND UPPER(COALESCE(payment_mode,'CASH'))='CASH' THEN amount
+                                WHEN entry_type='EXPENSE' AND UPPER(COALESCE(payment_mode,'CASH'))='CASH' THEN -amount ELSE 0 END),0) AS cash_balance,
+              COALESCE(SUM(CASE WHEN entry_type='INCOME' AND UPPER(COALESCE(payment_mode,'')) IN ('BANK','UPI') THEN amount
+                                WHEN entry_type='EXPENSE' AND UPPER(COALESCE(payment_mode,'')) IN ('BANK','UPI') THEN -amount ELSE 0 END),0) AS bank_ledger_balance,
+              COALESCE(SUM(CASE WHEN entry_type='INCOME' THEN amount ELSE -amount END),0) AS overall_balance
+            FROM financial_ledger
+            WHERE is_deleted = FALSE AND entry_date <= %s
+        """, (end,))
+        row = dict(cur.fetchone() or {})
+        return {
+            "cash_balance": Decimal(row.get("cash_balance") or 0),
+            "bank_ledger_balance": Decimal(row.get("bank_ledger_balance") or 0),
+            "overall_balance": Decimal(row.get("overall_balance") or 0),
+        }
     finally:
         cur.close()
         conn.close()
