@@ -155,3 +155,97 @@ def set_live_hearing_status(hearing_id: int, new_status: str, changed_by: int | 
         conn.rollback(); raise
     finally:
         cur.close(); conn.close()
+
+
+
+def complete_live_hearing(
+    hearing_id: int,
+    *,
+    next_date: date | None,
+    next_purpose: str,
+    order_summary: str,
+    documents_required: str,
+    create_task: bool,
+    notify_client: bool,
+    changed_by: int | None,
+):
+    """Atomically record a hearing outcome and mirror it into office records."""
+    ensure_live_hearing_tables()
+    conn = _connect(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS hearing_completions (
+                id SERIAL PRIMARY KEY,
+                live_hearing_id INTEGER UNIQUE REFERENCES live_hearings(id) ON DELETE CASCADE,
+                next_date DATE,
+                next_purpose TEXT,
+                order_summary TEXT,
+                documents_required TEXT,
+                task_created_id INTEGER,
+                notify_client BOOLEAN DEFAULT FALSE,
+                completed_by BIGINT,
+                completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("SELECT * FROM live_hearings WHERE id=%s FOR UPDATE", (hearing_id,))
+        hearing = cur.fetchone()
+        if not hearing:
+            return None
+        hearing = dict(hearing)
+        final_status = "ADJOURNED" if next_date else "DISPOSED"
+        cur.execute("""
+            UPDATE live_hearings SET status=%s, status_note=%s, completed_at=CURRENT_TIMESTAMP,
+                updated_by=%s, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s
+        """, (final_status, order_summary, changed_by, hearing_id))
+        task_id = None
+        case_number = hearing.get("case_number") or ""
+        if next_date and case_number:
+            cur.execute("""
+                UPDATE cases SET next_hearing=%s
+                WHERE LOWER(TRIM(COALESCE(case_number,'')))=LOWER(TRIM(%s))
+                   OR LOWER(TRIM(COALESCE(case_id,'')))=LOWER(TRIM(%s))
+            """, (next_date, case_number, case_number))
+        if create_task and documents_required.strip() and documents_required.strip().lower() not in {"none","nil","no","-"}:
+            cur.execute("""
+                INSERT INTO tasks(case_number, assigned_to, task, deadline, status)
+                VALUES (%s, %s, %s, %s, 'PENDING') RETURNING id
+            """, (case_number, hearing.get("assigned_to"), documents_required.strip(), next_date.isoformat() if next_date else None))
+            task_id = cur.fetchone()[0]
+        cur.execute("""
+            INSERT INTO hearing_completions(
+                live_hearing_id,next_date,next_purpose,order_summary,documents_required,
+                task_created_id,notify_client,completed_by
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (live_hearing_id) DO UPDATE SET
+                next_date=EXCLUDED.next_date,next_purpose=EXCLUDED.next_purpose,
+                order_summary=EXCLUDED.order_summary,documents_required=EXCLUDED.documents_required,
+                task_created_id=COALESCE(EXCLUDED.task_created_id,hearing_completions.task_created_id),
+                notify_client=EXCLUDED.notify_client,completed_by=EXCLUDED.completed_by,
+                completed_at=CURRENT_TIMESTAMP
+        """, (hearing_id,next_date,next_purpose,order_summary,documents_required,task_id,notify_client,changed_by))
+        # Timeline is deliberately direct and schema-compatible with the existing activity centre.
+        cur.execute("""
+            INSERT INTO client_timeline(
+                case_id,case_number,event_type,event_title,event_details,event_status,event_category,
+                source_type,source_id,created_by,event_at,is_internal
+            ) VALUES (%s,%s,'HEARING_COMPLETED','Hearing completed',%s,%s,'hearing',
+                      'LIVE_HEARING',%s,%s,CURRENT_TIMESTAMP,TRUE)
+            ON CONFLICT DO NOTHING
+        """, (
+            case_number, case_number,
+            f"Order: {order_summary}\nNext date: {next_date or '-'}\nPurpose: {next_purpose or '-'}\nDocuments: {documents_required or '-'}",
+            final_status, str(hearing_id), changed_by,
+        ))
+        cur.execute("""
+            INSERT INTO live_hearing_events(live_hearing_id,old_status,new_status,note,changed_by)
+            VALUES (%s,%s,%s,%s,%s)
+        """, (hearing_id, hearing.get('status'), final_status, order_summary, changed_by))
+        conn.commit()
+        return {**hearing, "status": final_status, "next_date": next_date, "next_purpose": next_purpose,
+                "order_summary": order_summary, "documents_required": documents_required,
+                "task_id": task_id, "notify_client": notify_client}
+    except Exception:
+        conn.rollback(); raise
+    finally:
+        cur.close(); conn.close()
