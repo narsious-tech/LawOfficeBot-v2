@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes
 
 from config import DATABASE_URL
 from advocate_web import AdvocateWeb
+from advocate_diaries import AdvocateDiaries
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -200,20 +201,126 @@ def parse_day_cases_pdf_text(text):
     return groups
 
 
-def fetch_advocate_diaries_cause_groups(target_date):
-    web = AdvocateWeb()
-    pdf_text = web.extract_day_cases_pdf_text(
-        target_date.strftime("%Y-%m-%d")
+def _normalize_api_case(case_item):
+    case_item = case_item if isinstance(case_item, dict) else {}
+
+    case_number = normalize_space(
+        case_item.get("case_number")
+        or case_item.get("case_no")
+        or case_item.get("registration_number")
+        or case_item.get("number")
+        or ""
+    )
+    petitioner = normalize_space(
+        case_item.get("petitioner")
+        or case_item.get("case_title_petitioner")
+        or case_item.get("client_name")
+        or ""
+    )
+    respondent = normalize_space(
+        case_item.get("respondent")
+        or case_item.get("case_title_respondent")
+        or case_item.get("verses_name")
+        or ""
+    )
+    case_title = normalize_space(
+        case_item.get("case_title")
+        or case_item.get("title")
+        or (f"{petitioner} vs {respondent}" if petitioner and respondent else petitioner or respondent)
     )
 
-    groups = parse_day_cases_pdf_text(pdf_text)
+    return {
+        "case_number": case_number,
+        "case_title": case_title,
+        "previous_date": normalize_space(
+            case_item.get("previous_date")
+            or case_item.get("last_date")
+            or ""
+        ),
+        "stage": normalize_space(
+            case_item.get("purpose")
+            or case_item.get("stage")
+            or case_item.get("next_date_purpose")
+            or ""
+        ),
+    }
+
+
+def _normalize_api_groups(payload):
+    if not isinstance(payload, dict) or not payload.get("success"):
+        message = payload.get("message") if isinstance(payload, dict) else None
+        raise RuntimeError(message or "Advocate Diaries API returned an unsuccessful response.")
+
+    data = payload.get("data") or {}
+    raw_groups = (
+        data.get("groups")
+        or data.get("courts")
+        or data.get("cause_list")
+        or []
+    ) if isinstance(data, dict) else []
+
+    groups = []
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, dict):
+            continue
+
+        court_data = raw_group.get("court")
+        court_name = (
+            court_data.get("name") if isinstance(court_data, dict) else court_data
+        ) or raw_group.get("court_name") or raw_group.get("name") or "Court"
+
+        judge_data = raw_group.get("judge")
+        judge_name = (
+            judge_data.get("name") if isinstance(judge_data, dict) else judge_data
+        ) or raw_group.get("judge_name") or raw_group.get("presiding_officer") or "Judge not recorded"
+
+        floor = raw_group.get("floor") or raw_group.get("floor_number") or ""
+        room = raw_group.get("room") or raw_group.get("room_number") or raw_group.get("court_room") or ""
+        raw_cases = raw_group.get("cases") or raw_group.get("matters") or []
+        cases = [_normalize_api_case(item) for item in raw_cases]
+        cases = [item for item in cases if item["case_number"] or item["case_title"]]
+
+        if cases:
+            groups.append({
+                "judge_name": normalize_space(str(judge_name)),
+                "court_name": normalize_space(str(court_name)),
+                "floor": normalize_space(str(floor)),
+                "room": normalize_space(str(room)),
+                "cases": cases,
+            })
 
     if not groups:
-        raise Exception(
-            "No court groups could be parsed from the Advocate Diaries PDF."
-        )
+        total_cases = data.get("total_cases", 0) if isinstance(data, dict) else 0
+        if total_cases == 0:
+            return []
+        raise RuntimeError("The Advocate Diaries API response contained no readable court groups.")
 
     return groups
+
+
+def fetch_advocate_diaries_cause_groups(target_date):
+    date_value = target_date.strftime("%Y-%m-%d")
+    failures = []
+
+    try:
+        web = AdvocateWeb()
+        pdf_text = web.extract_day_cases_pdf_text(date_value)
+        groups = parse_day_cases_pdf_text(pdf_text)
+        if groups:
+            return groups, "PDF"
+        failures.append("PDF: no court groups could be parsed")
+    except Exception as exc:
+        failures.append(f"PDF: {type(exc).__name__}: {exc}")
+
+    try:
+        api = AdvocateDiaries()
+        payload = api.daily_cause_list(date_value)
+        groups = _normalize_api_groups(payload)
+        return groups, "API"
+    except Exception as exc:
+        failures.append(f"API: {type(exc).__name__}: {exc}")
+
+    raise RuntimeError("; ".join(failures))
 
 
 def classify_floor(group):
@@ -786,6 +893,7 @@ def build_morning_dashboard():
     source_warnings = []
     database_live = False
     advocate_diaries_live = False
+    advocate_diaries_source = ""
 
     try:
         task_rows, case_rows, database_warnings = _load_morning_dashboard_database(today)
@@ -898,7 +1006,7 @@ def build_morning_dashboard():
     total_hearings = None
 
     try:
-        groups = fetch_advocate_diaries_cause_groups(today)
+        groups, advocate_diaries_source = fetch_advocate_diaries_cause_groups(today)
         cause_text, total_hearings = build_floor_wise_cause_list(
             groups,
             case_lookup,
@@ -907,8 +1015,10 @@ def build_morning_dashboard():
         advocate_diaries_live = True
     except Exception as exc:
         logger.exception("Morning dashboard Advocate Diaries source failed")
+        detail = normalize_space(str(exc)) or "No diagnostic detail was returned."
         source_warnings.append(
-            f"Advocate Diaries unavailable ({type(exc).__name__}); cause list and court movement were omitted."
+            "Advocate Diaries unavailable; cause list and court movement were omitted. "
+            f"Reason: {detail[:500]}"
         )
 
     urgent_staff = []
@@ -926,7 +1036,7 @@ def build_morning_dashboard():
         f"{'✅' if database_live else '⚠️'} Office Database: "
         f"{'Live' if database_live else 'Unavailable'}\n"
         f"{'✅' if advocate_diaries_live else '⚠️'} Advocate Diaries: "
-        f"{'Live' if advocate_diaries_live else 'Unavailable'}\n\n"
+        f"{'Live via ' + advocate_diaries_source if advocate_diaries_live else 'Unavailable'}\n\n"
         f"⚖️ Today's Hearings: {hearing_text}\n"
         f"🔴 Overdue Tasks: {len(overdue_tasks) if database_live else 'Unavailable'}\n"
         f"🟠 Tasks Due Today: {len(due_today_tasks) if database_live else 'Unavailable'}\n"
