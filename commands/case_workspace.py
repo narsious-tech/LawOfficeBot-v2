@@ -9,6 +9,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
+from services.case_timeline_service import get_case_timeline, render_timeline
 from services.case_workspace_service import (
     CaseSummary,
     get_case,
@@ -58,8 +59,9 @@ def workspace_keyboard(case_id: int) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("📋 Works", callback_data=f"casews:works:{case_id}"),
-            InlineKeyboardButton("🔄 Refresh", callback_data=f"casews:open:{case_id}"),
+            InlineKeyboardButton("📜 Timeline", callback_data=f"casews:timeline:{case_id}"),
         ],
+        [InlineKeyboardButton("🔄 Refresh", callback_data=f"casews:open:{case_id}")],
         [InlineKeyboardButton("⬅️ Cases", callback_data="casews:list")],
     ])
 
@@ -276,6 +278,9 @@ async def case_workspace_callback(update: Update, context: ContextTypes.DEFAULT_
             f"Case reference: <code>{esc(identifier)}</code>\n\n"
             "Use the Works menu to view and assign authoritative pending Works."
         )
+    elif action == "timeline":
+        events = get_case_timeline(case, limit=40)
+        text = render_timeline(case, events)
     else:
         text = "❌ Unknown Case Workspace action."
 
