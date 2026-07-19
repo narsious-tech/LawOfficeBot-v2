@@ -250,8 +250,8 @@ async def case_workspace_callback(update: Update, context: ContextTypes.DEFAULT_
             f"📚 Judgments: {counts.get('JUDGMENTS', 0)}\n"
             f"✉️ Correspondence: {counts.get('CORRESPONDENCE', 0)}\n"
             f"📎 Miscellaneous: {counts.get('MISCELLANEOUS', 0)}\n\n"
-            f"Upload: <code>/upload {esc(identifier)}</code>\n"
-            f"Full list: <code>/files {esc(identifier)}</code>"
+            "Use the buttons below to upload, browse, and filter documents.\n"
+            "Search all indexed documents with <code>/docsearch keyword</code>."
         )
         rows = [
             [InlineKeyboardButton("➕ Upload New Document", callback_data=f"docupload:choose:{db_id}")],
@@ -265,8 +265,9 @@ async def case_workspace_callback(update: Update, context: ContextTypes.DEFAULT_
             ],
             [
                 InlineKeyboardButton("📚 Judgments", callback_data=f"casews:doccat_JUDGMENTS:{db_id}"),
-                InlineKeyboardButton("📎 Other", callback_data=f"casews:doccat_MISCELLANEOUS:{db_id}"),
+                InlineKeyboardButton("✉️ Correspondence", callback_data=f"casews:doccat_CORRESPONDENCE:{db_id}"),
             ],
+            [InlineKeyboardButton("📎 Miscellaneous", callback_data=f"casews:doccat_MISCELLANEOUS:{db_id}")],
         ]
         if case.drive_folder_link != "-":
             rows.append([InlineKeyboardButton("☁️ Open Google Drive Folder", url=case.drive_folder_link)])

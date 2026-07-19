@@ -35,61 +35,17 @@ from services.activity_logger import (
 WAITING_FILE = 10
 CONFIRM_DUPLICATE_UPLOAD = 11
 
-DOCUMENT_CATEGORIES = {
-    "PLEADINGS": "Pleadings",
-    "ORDERS": "Orders",
-    "EVIDENCE": "Evidence",
-    "JUDGMENTS": "Judgments",
-    "CORRESPONDENCE": "Correspondence",
-    "MISCELLANEOUS": "Miscellaneous"
-}
-
-
-CATEGORY_ALIASES = {
-    "pleading": "PLEADINGS",
-    "pleadings": "PLEADINGS",
-
-    "order": "ORDERS",
-    "orders": "ORDERS",
-
-    "evidence": "EVIDENCE",
-    "evidences": "EVIDENCE",
-
-    "judgment": "JUDGMENTS",
-    "judgments": "JUDGMENTS",
-    "judgement": "JUDGMENTS",
-    "judgements": "JUDGMENTS",
-
-    "correspondence": "CORRESPONDENCE",
-    "letter": "CORRESPONDENCE",
-    "letters": "CORRESPONDENCE",
-
-    "misc": "MISCELLANEOUS",
-    "miscellaneous": "MISCELLANEOUS"
-}
-
-
-def normalize_document_category(
-    value: str
-) -> str:
-    if not value:
-        return "MISCELLANEOUS"
-
-    normalized = value.strip().lower()
-
-    return CATEGORY_ALIASES.get(
-        normalized,
-        "MISCELLANEOUS"
-    )
-
-
-def category_folder_name(
-    category: str
-) -> str:
-    return DOCUMENT_CATEGORIES.get(
-        category,
-        "Miscellaneous"
-    )
+from utils.document_categories import (
+    DOCUMENT_CATEGORIES,
+    normalize_document_category,
+    category_folder_name,
+    normalize_document_version,
+    version_label,
+)
+from services.document_folder_service import ensure_case_document_folders
+from services.document_version_service import build_versioned_filename, next_version_sequence
+from services.document_search_service import search_documents
+from commands.document_upload_wizard import category_keyboard, version_keyboard
 
 ROOT_FOLDER_ID = os.getenv(
     "ROOT_FOLDER_ID",
@@ -163,6 +119,16 @@ def clear_upload_session(
 
     context.user_data.pop(
         "upload_category_name",
+        None
+    )
+
+    context.user_data.pop(
+        "upload_version",
+        None
+    )
+
+    context.user_data.pop(
+        "upload_version_label",
         None
     )
 
@@ -449,10 +415,12 @@ async def _prepare_upload_session(
         return ConversationHandler.END
 
     try:
-        target_folder_id, _target_folder_link = get_or_create_subfolder(
-            case_folder_id,
-            folder_name,
-        )
+        folder_map = ensure_case_document_folders(case_folder_id)
+        target_folder_id = folder_map.get(category)
+        if not target_folder_id:
+            target_folder_id, _target_folder_link = get_or_create_subfolder(
+                case_folder_id, folder_name
+            )
     except Exception as exc:
         await update.effective_message.reply_text(
             "❌ Could not prepare the document category folder:\n"
@@ -472,8 +440,9 @@ async def _prepare_upload_session(
     if client_name:
         message += f"👤 Client: {client_name}\n"
     message += (
-        f"🗂 Category: {folder_name}\n\n"
-        "Now send the PDF, Word file, document, or photo to upload.\n\n"
+        f"🗂 Category: {folder_name}\n"
+        f"🏷 Version: {context.user_data.get('upload_version_label', 'Final')}\n\n"
+        "Step 3 of 3 — Send the PDF, Word file, document, or photo.\n\n"
         "Use /cancel to stop."
     )
 
@@ -488,63 +457,88 @@ async def upload_category_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    """Menu-driven upload entry point used from the Case Documents workspace."""
+    """Menu-driven category -> version -> file upload wizard."""
     query = update.callback_query
     await query.answer()
-    data = query.data or ""
-    parts = data.split(":")
+    parts = (query.data or "").split(":")
 
-    if len(parts) < 3 or not parts[2].isdigit():
+    if len(parts) < 3:
         await query.edit_message_text("❌ Invalid document upload selection.")
         return ConversationHandler.END
 
     mode = parts[1]
-    case_db_id = int(parts[2])
-    case_row = find_case_record_by_db_id(case_db_id)
-    if not case_row:
-        await query.edit_message_text("❌ This case is no longer available.")
-        return ConversationHandler.END
-
-    case_value = case_row[2] or case_row[1]
 
     if mode == "choose":
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("📝 Pleadings", callback_data=f"docupload:PLEADINGS:{case_db_id}"),
-                InlineKeyboardButton("⚖️ Orders", callback_data=f"docupload:ORDERS:{case_db_id}"),
-            ],
-            [
-                InlineKeyboardButton("🧾 Evidence", callback_data=f"docupload:EVIDENCE:{case_db_id}"),
-                InlineKeyboardButton("📚 Judgments", callback_data=f"docupload:JUDGMENTS:{case_db_id}"),
-            ],
-            [
-                InlineKeyboardButton("✉️ Correspondence", callback_data=f"docupload:CORRESPONDENCE:{case_db_id}"),
-                InlineKeyboardButton("📎 Miscellaneous", callback_data=f"docupload:MISCELLANEOUS:{case_db_id}"),
-            ],
-            [InlineKeyboardButton("⬅️ Cancel", callback_data=f"casews:documents:{case_db_id}")],
-        ])
+        if not parts[2].isdigit():
+            await query.edit_message_text("❌ Invalid case selection.")
+            return ConversationHandler.END
+        case_db_id = int(parts[2])
+        case_row = find_case_record_by_db_id(case_db_id)
+        if not case_row:
+            await query.edit_message_text("❌ This case is no longer available.")
+            return ConversationHandler.END
+        case_value = case_row[2] or case_row[1]
         await query.edit_message_text(
             "➕ <b>UPLOAD NEW DOCUMENT</b>\n\n"
             f"Case: <code>{case_value}</code>\n\n"
-            "Select the document category:",
+            "Step 1 of 3 — Select the document category:",
             parse_mode="HTML",
-            reply_markup=keyboard,
+            reply_markup=category_keyboard(case_db_id),
         )
         return ConversationHandler.END
 
-    if mode not in DOCUMENT_CATEGORIES:
-        await query.edit_message_text("❌ Invalid document category.")
+    if mode == "category":
+        if len(parts) != 4 or not parts[3].isdigit():
+            await query.edit_message_text("❌ Invalid category selection.")
+            return ConversationHandler.END
+        category = normalize_document_category(parts[2])
+        case_db_id = int(parts[3])
+        case_row = find_case_record_by_db_id(case_db_id)
+        if not case_row:
+            await query.edit_message_text("❌ This case is no longer available.")
+            return ConversationHandler.END
+        case_value = case_row[2] or case_row[1]
+        await query.edit_message_text(
+            "➕ <b>UPLOAD NEW DOCUMENT</b>\n\n"
+            f"Case: <code>{case_value}</code>\n"
+            f"Category: <b>{category_folder_name(category)}</b>\n\n"
+            "Step 2 of 3 — Select the document status/version:",
+            parse_mode="HTML",
+            reply_markup=version_keyboard(case_db_id, category),
+        )
         return ConversationHandler.END
 
-    await query.edit_message_text(
-        "⏳ Preparing the Google Drive folder...",
-    )
-    return await _prepare_upload_session(
-        update,
-        context,
-        case_value=case_value,
-        category_input=mode,
-    )
+    if mode == "version":
+        if len(parts) != 5 or not parts[4].isdigit():
+            await query.edit_message_text("❌ Invalid version selection.")
+            return ConversationHandler.END
+        version = normalize_document_version(parts[2])
+        category = normalize_document_category(parts[3])
+        case_db_id = int(parts[4])
+        case_row = find_case_record_by_db_id(case_db_id)
+        if not case_row:
+            await query.edit_message_text("❌ This case is no longer available.")
+            return ConversationHandler.END
+        case_value = case_row[2] or case_row[1]
+        context.user_data["upload_version"] = version
+        context.user_data["upload_version_label"] = version_label(version)
+        await query.edit_message_text("⏳ Preparing the structured Google Drive folder...")
+        return await _prepare_upload_session(
+            update, context, case_value=case_value, category_input=category
+        )
+
+    # Backwards compatibility for Sprint 6 callback data: docupload:CATEGORY:CASE_ID
+    if len(parts) == 3 and parts[2].isdigit():
+        category = normalize_document_category(mode)
+        case_db_id = int(parts[2])
+        await query.edit_message_text(
+            "Step 2 of 3 — Select the document status/version:",
+            reply_markup=version_keyboard(case_db_id, category),
+        )
+        return ConversationHandler.END
+
+    await query.edit_message_text("❌ Invalid document upload selection.")
+    return ConversationHandler.END
 
 
 async def upload_start(
@@ -567,6 +561,9 @@ async def upload_start(
 
     case_value = context.args[0]
     category_input = context.args[1] if len(context.args) > 1 else "miscellaneous"
+    version_input = context.args[2] if len(context.args) > 2 else "FINAL"
+    context.user_data["upload_version"] = normalize_document_version(version_input)
+    context.user_data["upload_version_label"] = version_label(version_input)
     return await _prepare_upload_session(
         update,
         context,
@@ -710,6 +707,7 @@ async def complete_drive_upload(
             details=(
                 f"File: {filename}\n"
                 f"Category: {category_name}\n"
+                f"Version: {context.user_data.get('upload_version_label', 'Final')}\n"
                 f"Size: {file_size:,} bytes\n"
                 f"Drive: {uploaded.get('webViewLink') or '-'}"
             ),
@@ -721,6 +719,8 @@ async def complete_drive_upload(
                 "file_name": filename,
                 "category": category,
                 "category_name": category_name,
+                "document_version": context.user_data.get("upload_version", "FINAL"),
+                "document_version_label": context.user_data.get("upload_version_label", "Final"),
                 "drive_file_id": uploaded.get("id"),
                 "drive_file_link": uploaded.get("webViewLink"),
                 "file_size": file_size,
@@ -768,6 +768,7 @@ async def complete_drive_upload(
         f"🆔 File ID: {file_record_id}\n"
         f"🔢 Case: {case_id}\n"
         f"🗂 Category: {category_name}\n"
+        f"🏷 Version: {context.user_data.get('upload_version_label', 'Final')}\n"
         f"📄 File: {filename}\n"
         f"📦 Size: {file_size:,} bytes\n"
         f"🕒 Uploaded: "
@@ -882,6 +883,16 @@ async def upload_file(
         sha256_hash = calculate_sha256(
             local_path
         )
+
+        upload_version_label = context.user_data.get("upload_version_label", "Final")
+        conn = get_db_connection()
+        try:
+            sequence = next_version_sequence(conn, case_id, filename, upload_version_label)
+            filename = build_versioned_filename(filename, upload_version_label, sequence)
+        except Exception as exc:
+            print(f"DOCUMENT VERSION ALLOCATION WARNING: {type(exc).__name__}: {exc}")
+        finally:
+            conn.close()
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -1149,6 +1160,32 @@ async def cancel_upload(
 
     return ConversationHandler.END
     
+async def docsearch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Usage: /docsearch KEYWORD\nExample: /docsearch appeal"
+        )
+        return
+    query_text = " ".join(context.args).strip()
+    conn = get_db_connection()
+    try:
+        results = search_documents(conn, query_text, limit=30)
+    finally:
+        conn.close()
+    if not results:
+        await update.effective_message.reply_text(f"🔎 No indexed documents found for: {query_text}")
+        return
+    lines = [f"🔎 DOCUMENT SEARCH\nFound {len(results)} result(s) for: {query_text}\n"]
+    for item in results:
+        lines.append(
+            f"🆔 #{item['id']} · {item['case_id']}\n"
+            f"📄 {item['file_name']}\n"
+            f"🗂 {category_folder_name(item.get('category'))}\n"
+            f"/openfile {item['id']}\n──────────"
+        )
+    await send_long_message(update, "\n".join(lines))
+
+
 async def files(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
