@@ -32,6 +32,9 @@ class DashboardSummary:
     appointments_today: int | None = None
     pending_works: int | None = None
     pending_tasks: int | None = None
+    urgent_tasks: int | None = None
+    overdue_tasks: int | None = None
+    tasks_due_today: int | None = None
     staff_present: int | None = None
     staff_total: int | None = None
     documents_today: int | None = None
@@ -187,6 +190,64 @@ def _count_pending_tasks() -> int:
         conn.close()
 
 
+
+def _task_operational_counts() -> tuple[int, int, int]:
+    """Return urgent, overdue and due-today counts using available task columns."""
+    now = datetime.now(IST)
+    today = now.date()
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            if not _table_exists(cur, "tasks"):
+                return 0, 0, 0
+
+            has_priority = _column_exists(cur, "tasks", "priority")
+            due_columns = [
+                name
+                for name in ("due_at", "deadline")
+                if _column_exists(cur, "tasks", name)
+            ]
+
+            select_columns = []
+            if has_priority:
+                select_columns.append("priority")
+            select_columns.extend(due_columns)
+
+            if not select_columns:
+                return 0, 0, 0
+
+            cur.execute(
+                f"""
+                SELECT {', '.join(select_columns)}
+                FROM tasks
+                WHERE COALESCE(UPPER(TRIM(status)), 'PENDING')
+                      NOT IN ('COMPLETED', 'COMPLETE', 'DONE', 'CLOSED', 'CANCELLED')
+                """
+            )
+
+            urgent = 0
+            overdue = 0
+            due_today = 0
+            for row in cur.fetchall():
+                offset = 0
+                if has_priority:
+                    priority = str(row[0] or "NORMAL").strip().upper()
+                    urgent += int(priority == "URGENT")
+                    offset = 1
+
+                parsed_dates = [_parse_date(value) for value in row[offset:]]
+                due = next((value for value in parsed_dates if value is not None), None)
+                if due is None:
+                    continue
+                if due < today:
+                    overdue += 1
+                elif due == today:
+                    due_today += 1
+
+            return urgent, overdue, due_today
+    finally:
+        conn.close()
+
 def _attendance_counts() -> tuple[int, int]:
     today = datetime.now(IST).date()
     conn = _connect()
@@ -312,6 +373,12 @@ def get_dashboard_summary(telegram_user_id: int | None = None) -> DashboardSumma
     except Exception:
         logger.exception("Dashboard source failed: attendance")
 
+    urgent, overdue, due_today = (None, None, None)
+    try:
+        urgent, overdue, due_today = _task_operational_counts()
+    except Exception:
+        logger.exception("Dashboard source failed: task_operational_counts")
+
     summary = DashboardSummary(
         hearings_today=_safe_count("hearings_today", _count_hearings_today),
         # Appointments remain deliberately unavailable until the Advocate
@@ -319,6 +386,9 @@ def get_dashboard_summary(telegram_user_id: int | None = None) -> DashboardSumma
         appointments_today=None,
         pending_works=_safe_count("pending_works", _count_pending_works),
         pending_tasks=_safe_count("pending_tasks", _count_pending_tasks),
+        urgent_tasks=urgent,
+        overdue_tasks=overdue,
+        tasks_due_today=due_today,
         staff_present=present,
         staff_total=total,
         documents_today=_safe_count("documents_today", _count_documents_today),
