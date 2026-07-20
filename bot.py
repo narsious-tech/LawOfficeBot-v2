@@ -52,6 +52,7 @@ from api_explorer import run_api_explorer
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 
+from commands.case_assignment import workcontrol, reconcileassignments
 from commands.workspace_v13 import (
     caseworkspace13, workboard, myworks, workspace13_callback,
 )
@@ -3668,6 +3669,8 @@ app.add_handler(
 app.add_handler(CommandHandler("caseworkspace", caseworkspace13))
 app.add_handler(CommandHandler("workboard", workboard))
 app.add_handler(CommandHandler("myworks", myworks))
+app.add_handler(CommandHandler("workcontrol", workcontrol))
+app.add_handler(CommandHandler("reconcileassignments", reconcileassignments))
 app.add_handler(CallbackQueryHandler(workspace13_callback, pattern=r"^s13:"))
 
 app.add_handler(CommandHandler("works", works))
