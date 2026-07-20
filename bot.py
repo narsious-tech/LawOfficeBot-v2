@@ -53,6 +53,7 @@ from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 
 from commands.case_assignment import workcontrol, reconcileassignments
+from commands.case_intelligence import nextdateslist, physical_file_next_dates_job
 from commands.workspace_v13 import (
     caseworkspace13, workboard, myworks, workspace13_callback,
 )
@@ -3983,6 +3984,8 @@ app.add_handler(
     )
 )
 
+app.add_handler(CommandHandler("nextdateslist", nextdateslist))
+
 # Sprint 8 private ledger handlers
 register_ledger_handlers(app)
 
@@ -3992,6 +3995,13 @@ app.job_queue.run_repeating(
     first=30
 )
 
+
+
+app.job_queue.run_daily(
+    physical_file_next_dates_job,
+    time=time(hour=16, minute=30, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="physical_file_next_dates_430pm"
+)
 
 app.job_queue.run_daily(
     pending_tasks_summary_job,
