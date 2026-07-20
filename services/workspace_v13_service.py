@@ -216,3 +216,22 @@ def complete_work(work_id: int, changed_by: int | None, note: str = "Completed f
         conn.rollback(); raise
     finally:
         conn.close()
+
+
+def timeline_entries(case_id: int, case_number: str, limit: int = 12) -> list[dict[str, Any]]:
+    """Return recent normalized timeline events for the case."""
+    ensure_schema()
+    conn = _connect()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT event_date, event_type, status, outcome, preparation,
+                       next_hearing_date, next_purpose, created_at
+                FROM case_hearing_timeline
+                WHERE case_record_id=%s OR case_number=%s
+                ORDER BY COALESCE(event_date, created_at::date) DESC, id DESC
+                LIMIT %s
+            """, (case_id, case_number, limit))
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
