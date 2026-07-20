@@ -383,6 +383,12 @@ def complete_live_hearing(
         meaningful_prep = bool(prep and prep.lower() not in {"none","nil","no","-","/none"})
         if meaningful_prep:
             due_date = work_due_date or next_date
+            try:
+                from services.case_assignment_service import get_case_owner
+                ownership = get_case_owner(case_number, hearing.get("floor"), case_record_id=case_record_id, court=hearing.get("court_name"), judge=hearing.get("judge_name"))
+                work_assigned_to = ownership.get("owner_staff") or work_assigned_to or "Preet"
+            except Exception:
+                work_assigned_to = work_assigned_to or "Preet"
             cur.execute("""
                 INSERT INTO case_works(case_record_id,case_number,live_hearing_id,title,details,
                     assigned_to,due_date,priority,status,created_by)
