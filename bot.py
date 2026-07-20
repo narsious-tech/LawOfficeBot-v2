@@ -54,7 +54,10 @@ from zoneinfo import ZoneInfo
 
 from commands.case_assignment import workcontrol, reconcileassignments
 from commands.case_intelligence import nextdateslist, physical_file_next_dates_job
-from commands.evening_dashboard import eveningdashboard, printablecauselist, evening_dashboard_job
+from commands.evening_dashboard import (
+    eveningdashboard, printablecauselist, evening_dashboard_job,
+    filesready, evening_file_checkin_callback,
+)
 from commands.workspace_v13 import (
     caseworkspace13, workboard, myworks, workspace13_callback,
 )
@@ -3959,6 +3962,8 @@ app.add_handler(
 app.add_handler(CommandHandler("nextdateslist", nextdateslist))
 app.add_handler(CommandHandler("eveningdashboard", eveningdashboard))
 app.add_handler(CommandHandler("printablecauselist", printablecauselist))
+app.add_handler(CommandHandler("filesready", filesready))
+app.add_handler(CallbackQueryHandler(evening_file_checkin_callback, pattern=r"^efd:"))
 
 # Sprint 8 private ledger handlers
 register_ledger_handlers(app)
