@@ -54,6 +54,7 @@ from zoneinfo import ZoneInfo
 
 from commands.case_assignment import workcontrol, reconcileassignments
 from commands.case_intelligence import nextdateslist, physical_file_next_dates_job
+from commands.evening_dashboard import eveningdashboard, printablecauselist, evening_dashboard_job
 from commands.workspace_v13 import (
     caseworkspace13, workboard, myworks, workspace13_callback,
 )
@@ -3985,6 +3986,8 @@ app.add_handler(
 )
 
 app.add_handler(CommandHandler("nextdateslist", nextdateslist))
+app.add_handler(CommandHandler("eveningdashboard", eveningdashboard))
+app.add_handler(CommandHandler("printablecauselist", printablecauselist))
 
 # Sprint 8 private ledger handlers
 register_ledger_handlers(app)
@@ -3996,6 +3999,13 @@ app.job_queue.run_repeating(
 )
 
 
+
+
+app.job_queue.run_daily(
+    evening_dashboard_job,
+    time=time(hour=16, minute=30, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="evening_dashboard_430pm"
+)
 
 app.job_queue.run_daily(
     physical_file_next_dates_job,
