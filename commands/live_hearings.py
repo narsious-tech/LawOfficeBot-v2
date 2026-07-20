@@ -59,7 +59,7 @@ def _detail_keyboard(hearing_id, page=0):
 def _board_text(rows, source=None, page=0):
     now = datetime.now(IST)
     page, pages, visible = _page_bounds(rows, page)
-    lines = ["⚖️ LIVE HEARING CONTROL", f"📅 {now:%d-%m-%Y}  •  🕘 {now:%I:%M %p} IST", "🧩 Sprint 12.2.6 Completion Flow Cleanup"]
+    lines = ["⚖️ LIVE HEARING CONTROL", f"📅 {now:%d-%m-%Y}  •  🕘 {now:%I:%M %p} IST", "🧩 Sprint 14.0 Dynamic Case Ownership"]
     if source:
         lines.append(f"🔗 Synced via Advocate Diaries {source}")
     lines.append("")
@@ -171,38 +171,22 @@ async def completion_documents(update: Update, context: ContextTypes.DEFAULT_TYP
     none_values = {"/none", "none", "nil", "no", "-"}
     data = context.user_data["hearing_completion"]
     if not text or text.lower() in none_values:
-        data["documents"] = ""
-        data["work_assigned_to"] = None
-        data["work_due_date"] = None
-        data["work_priority"] = None
-        data["notify"] = False
-        summary = "\n".join([
-            "✅ CONFIRM HEARING OUTCOME", "",
-            f"📅 Next date: {data.get('next_date') or '-'}",
-            f"📍 Purpose: {data.get('purpose') or '-'}",
-            f"📝 Order: {data.get('order') or '-'}",
-            "",
-            "📋 Work: None",
-            "ℹ️ No work will be created.",
-        ])
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Save completion", callback_data="lhcw:confirm"),
-            InlineKeyboardButton("❌ Cancel", callback_data="lhcw:cancel"),
-        ]])
-        await update.effective_message.reply_text(summary, reply_markup=kb)
-        return CONFIRM
-
+        data["documents"] = ""; data["work_assigned_to"] = None
+        data["work_due_date"] = None; data["work_priority"] = None; data["notify"] = False
+        summary = "\n".join(["✅ CONFIRM HEARING OUTCOME", "",f"📅 Next date: {data.get('next_date') or '-'}",f"📍 Purpose: {data.get('purpose') or '-'}",f"📝 Order: {data.get('order') or '-'}","","📋 Work: None","ℹ️ No work will be created."])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Save completion", callback_data="lhcw:confirm"),InlineKeyboardButton("❌ Cancel", callback_data="lhcw:cancel")]])
+        await update.effective_message.reply_text(summary, reply_markup=kb); return CONFIRM
     data["documents"] = text
-    from services.live_hearing_service import list_active_staff
-    staff = list_active_staff()
-    rows = []
-    for item in staff:
-        rows.append([InlineKeyboardButton(item, callback_data=f"lhcw:assignee:{item}")])
-    rows.append([InlineKeyboardButton("Unassigned", callback_data="lhcw:assignee:__UNASSIGNED__")])
-    await update.effective_message.reply_text(
-        "👤 Assign this work to:", reply_markup=InlineKeyboardMarkup(rows)
-    )
-    return ASSIGNEE
+    row=get_live_hearing(data["hearing_id"])
+    try:
+        from services.case_assignment_service import get_case_owner
+        owner=get_case_owner(row.get("case_number") or "",row.get("floor"),court=row.get("court_name"),judge=row.get("judge_name"))
+        data["work_assigned_to"]=owner.get("owner_staff") or "Preet"
+    except Exception:
+        data["work_assigned_to"]="Preet"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Tomorrow", callback_data="lhcw:due:tomorrow")],[InlineKeyboardButton("3 days before hearing", callback_data="lhcw:due:minus3")],[InlineKeyboardButton("7 days before hearing", callback_data="lhcw:due:minus7")],[InlineKeyboardButton("Custom date", callback_data="lhcw:due:custom")]])
+    await update.effective_message.reply_text(f"👤 Work will be assigned automatically to: {data['work_assigned_to']}\n\n📅 Select the work due date:",reply_markup=kb)
+    return DUE_DATE
 
 
 async def completion_assignee_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
