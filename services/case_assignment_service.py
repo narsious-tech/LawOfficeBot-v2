@@ -83,19 +83,69 @@ def assign_case(case_number: str, floor: Any, *, case_record_id: int|None=None, 
     except Exception: conn.rollback(); raise
     finally: conn.close()
 
+def _latest_mirrored_hearing(case_number: str) -> dict | None:
+    """Return the latest Advocate Diaries-mirrored hearing with resolved court data."""
+    conn = _connect()
+    try:
+      with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+          SELECT case_number, floor, court_name, judge_name, hearing_date
+          FROM live_hearings
+          WHERE LOWER(TRIM(case_number)) = LOWER(TRIM(%s))
+          ORDER BY
+            CASE WHEN NULLIF(TRIM(COALESCE(floor,'')),'') IS NOT NULL THEN 0 ELSE 1 END,
+            hearing_date DESC, updated_at DESC
+          LIMIT 1
+        """, (case_number,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+      conn.close()
+
 def get_case_owner(case_number: str, floor: Any=None, *, case_record_id: int|None=None, court: str|None=None, judge: str|None=None) -> dict:
+    # Reuse the Advocate Diaries mirror used by the cause list and morning dashboard.
+    # This also prevents a workspace record with no local floor from overwriting a
+    # previously correct automatic ownership assignment with the Preet fallback.
+    resolved_floor = normalize_floor(floor)
+    if resolved_floor is None and case_number:
+      mirrored = _latest_mirrored_hearing(case_number)
+      if mirrored and normalize_floor(mirrored.get('floor')) is not None:
+        floor = mirrored.get('floor')
+        court = mirrored.get('court_name') or court
+        judge = mirrored.get('judge_name') or judge
+        resolved_floor = normalize_floor(floor)
+
+    if resolved_floor is None:
+      conn = _connect()
+      try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+          cur.execute("SELECT * FROM case_ownership WHERE case_number=%s AND active=TRUE", (case_number,))
+          existing = cur.fetchone()
+          if existing and existing.get('source_floor') is not None:
+            return dict(existing)
+      finally:
+        conn.close()
+
     return assign_case(case_number,floor,case_record_id=case_record_id,court=court,judge=judge)
 
 def reconcile_live_hearings() -> int:
+    # Refresh the same normalized Advocate Diaries mirror used by the morning
+    # dashboard/cause list before calculating ownership.
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from services.live_hearing_service import sync_live_hearings
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    sync_live_hearings(today)
+
     ensure_schema(); conn=_connect(); count=0
     try:
       with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT case_number,floor,court_name,judge_name FROM live_hearings WHERE hearing_date=CURRENT_DATE")
+        cur.execute("SELECT case_number,floor,court_name,judge_name FROM live_hearings WHERE hearing_date=%s", (today,))
         rows=[dict(r) for r in cur.fetchall()]
       conn.close(); conn=None
       for r in rows:
         if r.get('case_number'):
-          assign_case(r['case_number'],r.get('floor'),court=r.get('court_name'),judge=r.get('judge_name')); count+=1
+          get_case_owner(r['case_number'],r.get('floor'),court=r.get('court_name'),judge=r.get('judge_name')); count+=1
       return count
     finally:
       if conn: conn.close()
