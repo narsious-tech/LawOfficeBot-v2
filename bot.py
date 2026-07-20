@@ -56,6 +56,7 @@ from commands.case_assignment import workcontrol, reconcileassignments
 from commands.case_intelligence import nextdateslist, physical_file_next_dates_job
 from commands.role_intelligence import mydashboard, officestatus, myfilesstatus, physical_file_status_callback
 from commands.hearing_readiness import readiness, morningreadiness
+from commands.office_os import office, mywork_menu, files_menu, supervisor_menu, los_callback
 from commands.evening_dashboard import (
     eveningdashboard, printablecauselist, evening_dashboard_job,
     filesready, evening_file_checkin_callback, evening_file_selection_callback,
@@ -3608,7 +3609,12 @@ conv_handler = ConversationHandler(
 
 app.add_handler(conv_handler)
 app.add_handler(CommandHandler("testad", test_ad))
-app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("start", office))
+app.add_handler(CommandHandler("office", office))
+app.add_handler(CommandHandler("home", office))
+app.add_handler(CommandHandler("mywork", mywork_menu))
+app.add_handler(CommandHandler("supervisor", supervisor_menu))
+app.add_handler(CallbackQueryHandler(los_callback, pattern=r"^los:"))
 app.add_handler(CommandHandler("findcase", findcase))
 app.add_handler(CommandHandler("synccases", synccases))
 app.add_handler(CommandHandler("case", case))
