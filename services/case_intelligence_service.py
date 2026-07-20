@@ -51,52 +51,39 @@ def _ad_token() -> str | None:
 
 
 def advocate_diaries_pending_cases() -> list[dict[str, Any]]:
-    """Mirror Advocate Diaries' pending-case column through its existing API."""
-    api = (os.getenv("AD_API") or "").rstrip("/")
-    token = _ad_token()
-    if not api or not token:
-        return []
+    """Read only the dedicated Advocate Diaries Pending Cases page.
 
-    headers = {"Authorization": f"Bearer {token}"}
+    This intentionally does not treat every court case whose generic status is
+    'pending' as a missing hearing update.
+    """
+    from bs4 import BeautifulSoup
+    from advocate_web import AdvocateWeb
+    web = AdvocateWeb()
+    response = web.get("/pendingCases")
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "lxml")
     pending: list[dict[str, Any]] = []
-    page = 1
-    while page <= 250:
-        response = requests.get(
-            f"{api}/court_cases", params={"page": page}, headers=headers, timeout=30
-        )
-        if response.status_code == 404:
-            break
-        response.raise_for_status()
-        data = (response.json().get("data") or [])
-        if not data:
-            break
-        for case in data:
-            if str(case.get("status") or "").strip().lower() != "pending":
-                continue
-            case_number = str(case.get("case_number") or case.get("case_no") or "Case").strip()
-            title = str(
-                case.get("case_title")
-                or case.get("title")
-                or case.get("client_name")
-                or "Untitled case"
-            ).strip()
-            next_date = case.get("hearing_date") or case.get("next_hearing_date") or case.get("next_date")
-            purpose = case.get("purpose") or case.get("next_purpose") or case.get("stage")
-            missing = []
-            if not next_date:
-                missing.append("Next date")
-            if not purpose:
-                missing.append("Next purpose")
-            if not missing:
-                missing.append("Advocate Diaries update pending")
-            pending.append({
-                "case_number": case_number,
-                "case_title": title,
-                "next_date": next_date,
-                "next_purpose": purpose,
-                "missing": missing,
-            })
-        page += 1
+    # The page is rendered as one record per table row/card.
+    candidates = soup.select("table tbody tr") or soup.select(".pending-case, .case-row, .card")
+    for node in candidates:
+        text = " ".join(node.get_text(" ", strip=True).split())
+        if not text or "Case Title:" not in text:
+            continue
+        def grab(label: str, stops: tuple[str, ...]) -> str:
+            import re
+            stop = "|".join(re.escape(x) for x in stops)
+            m = re.search(re.escape(label) + r"\s*(.*?)(?=" + stop + r"|$)", text, flags=re.I)
+            return (m.group(1).strip() if m else "")
+        title = grab("Case Title:", ("Case Type:", "Case Number:", "Court:")) or "Untitled case"
+        number = grab("Case Number:", ("Pending", "Court:", "Judge:", "Next Hearing:")) or "Case"
+        next_date = grab("Next Hearing:", ("Purpose:", "Previous Hearing:", "Settlement"))
+        purpose = grab("Purpose:", ("Previous Hearing:", "Settlement", "Paid Amount:"))
+        missing = []
+        if not next_date: missing.append("Next date")
+        if not purpose: missing.append("Next purpose")
+        pending.append({"case_number": number, "case_title": title, "next_date": next_date or None,
+                        "next_purpose": purpose or None,
+                        "missing": missing or ["Advocate Diaries update pending"]})
     return pending
 
 
