@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
-import os
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
+from urllib.parse import unquote
 
 import psycopg2
-import requests
+from bs4 import BeautifulSoup
 
-from advocate_diaries import AdvocateDiaries, BASE_URL
+from advocate_web import AdvocateWeb, BASE_URL
 from config import DATABASE_URL
 
 
@@ -19,6 +20,7 @@ class WritebackResult:
     message: str
     remote_case_id: str | None = None
     endpoint: str | None = None
+    verified: bool = False
 
 
 def _connect():
@@ -64,90 +66,178 @@ def queue_writeback(live_hearing_id: int, case_number: str, payload: dict[str, A
         cur.close(); conn.close()
 
 
-def _extract_records(data: Any) -> list[dict[str, Any]]:
-    if isinstance(data, list):
-        return [x for x in data if isinstance(x, dict)]
-    if not isinstance(data, dict):
-        return []
-    for key in ("data", "results", "records", "court_cases", "cases", "items"):
-        value = data.get(key)
-        if isinstance(value, list):
-            return [x for x in value if isinstance(x, dict)]
-        if isinstance(value, dict):
-            for nested in ("data", "results", "records", "items"):
-                rows = value.get(nested)
-                if isinstance(rows, list):
-                    return [x for x in rows if isinstance(x, dict)]
-    return []
+def _norm_case_number(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]", "", (value or "").casefold())
 
 
-def _case_number(item: dict[str, Any]) -> str:
-    for key in ("case_number", "case_no", "caseNumber", "number"):
-        if item.get(key):
-            return str(item[key]).strip()
-    return ""
+def _extract_csrf(web: AdvocateWeb, html: str = "") -> str:
+    """Extract CakePHP CSRF request token from page markup or the authenticated cookie jar."""
+    soup = BeautifulSoup(html or "", "lxml")
+    selectors = [
+        ("meta", {"name": "csrfToken"}, "content"),
+        ("meta", {"name": "csrf-token"}, "content"),
+        ("input", {"name": "_csrfToken"}, "value"),
+    ]
+    for tag, attrs, attr in selectors:
+        node = soup.find(tag, attrs)
+        if node and node.get(attr):
+            return str(node.get(attr)).strip()
+
+    for pattern in (
+        r'csrfToken\s*[:=]\s*["\']([^"\']+)',
+        r'_csrfToken\s*[:=]\s*["\']([^"\']+)',
+        r'X-CSRF-Token["\']?\s*[:=]\s*["\']([^"\']+)',
+    ):
+        match = re.search(pattern, html or "", flags=re.I)
+        if match:
+            return match.group(1).strip()
+
+    cookie = web.session.cookies.get("csrfToken")
+    if cookie:
+        return unquote(cookie)
+    raise RuntimeError("Authenticated Advocate Diaries CSRF token was not found")
 
 
-def find_remote_case(case_number: str) -> tuple[str | None, dict[str, Any] | None]:
-    client = AdvocateDiaries()
-    response = requests.get(
-        f"{BASE_URL}/court_cases",
-        params={"search": case_number},
-        headers=client.headers(),
-        timeout=(10, 60),
+def _parse_day_cases(html: str) -> list[dict[str, str]]:
+    soup = BeautifulSoup(html or "", "lxml")
+    records: list[dict[str, str]] = []
+    for row in soup.select("tr[id^='case_']"):
+        remote_id = row.get("id", "").removeprefix("case_").strip()
+        link = row.select_one(".add-next-hearing-dashboard")
+        if link and link.get("data-id"):
+            remote_id = str(link.get("data-id")).strip()
+        text = row.get_text("\n", strip=True)
+        number_match = re.search(r"Case Number:\s*([^\n]+)", text, flags=re.I)
+        purpose_match = re.search(r"Purpose:\s*([^\n]+)", text, flags=re.I)
+        previous_match = re.search(r"Previous Hearing:\s*([^\n]+)", text, flags=re.I)
+        records.append({
+            "remote_id": remote_id,
+            "case_number": number_match.group(1).strip() if number_match else "",
+            "purpose": (link.get("data-purpose") if link else None) or (purpose_match.group(1).strip() if purpose_match else ""),
+            "previous_hearing_date": (link.get("data-previous-hearing-date") if link else None) or (previous_match.group(1).strip() if previous_match else ""),
+        })
+    return records
+
+
+def _load_day_page(web: AdvocateWeb, case_date: date) -> tuple[str, str]:
+    web.ensure_login()
+    endpoint = f"{BASE_URL}/dashboard/search-day-cases"
+    response = web.session.get(
+        endpoint,
+        params={"case_date": case_date.isoformat()},
+        headers={
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{BASE_URL}/dashboard?currentView=dashboard",
+            "Accept": "*/*",
+        },
+        timeout=(10, 90),
     )
     response.raise_for_status()
-    data = response.json()
-    normalized = case_number.replace(" ", "").lower()
-    for item in _extract_records(data):
-        candidate = _case_number(item).replace(" ", "").lower()
-        if candidate == normalized:
-            remote_id = item.get("id") or item.get("court_case_id") or item.get("case_id") or item.get("uuid")
-            return (str(remote_id) if remote_id is not None else None), item
-    return None, None
+    if "/auth/login" in response.url:
+        raise RuntimeError("Advocate Diaries web session expired during cause-list lookup")
+    return response.text, _extract_csrf(web, response.text)
 
 
-def _build_payload(next_date: date | None, next_purpose: str, order_summary: str, documents_required: str) -> dict[str, Any]:
-    # Canonical payload. Field aliases can be overridden in Railway without code changes.
-    date_key = os.getenv("AD_UPDATE_DATE_FIELD", "next_hearing")
-    purpose_key = os.getenv("AD_UPDATE_PURPOSE_FIELD", "purpose")
-    order_key = os.getenv("AD_UPDATE_ORDER_FIELD", "order_summary")
-    prep_key = os.getenv("AD_UPDATE_PREPARATION_FIELD", "notes")
-    payload: dict[str, Any] = {
-        date_key: next_date.isoformat() if next_date else None,
-        purpose_key: next_purpose or None,
-        order_key: order_summary or None,
-        prep_key: documents_required or None,
+def find_remote_case(web: AdvocateWeb, case_number: str, case_date: date) -> tuple[str | None, dict[str, str] | None, str]:
+    html, csrf = _load_day_page(web, case_date)
+    wanted = _norm_case_number(case_number)
+    for record in _parse_day_cases(html):
+        if _norm_case_number(record.get("case_number")) == wanted:
+            return record.get("remote_id") or None, record, csrf
+    return None, None, csrf
+
+
+def _payload(
+    *, remote_id: str, current_case_date: date, previous_hearing_date: str,
+    next_date: date, next_purpose: str, order_summary: str, documents_required: str,
+) -> dict[str, str]:
+    return {
+        "id": remote_id,
+        "purpose": (next_purpose or "").strip(),
+        "previous_hearing_date": (previous_hearing_date or f"{current_case_date.month}/{current_case_date.day}/{str(current_case_date.year)[2:]}").strip(),
+        "next_hearing_date": next_date.isoformat(),
+        "remarks": (order_summary or "").strip(),
+        "case_date": current_case_date.isoformat(),
+        "work": (documents_required or "").strip(),
     }
-    return {k: v for k, v in payload.items() if v is not None}
+
+
+def _verify(web: AdvocateWeb, case_number: str, expected_date: date) -> bool:
+    """Verification succeeds when the case appears on the newly submitted hearing date."""
+    try:
+        html, _ = _load_day_page(web, expected_date)
+        wanted = _norm_case_number(case_number)
+        return any(_norm_case_number(r.get("case_number")) == wanted for r in _parse_day_cases(html))
+    except Exception:
+        return False
+
+
+def _post(web: AdvocateWeb, payload: dict[str, str], csrf: str):
+    endpoint = f"{BASE_URL}/hearings/add-dashboard-hearing"
+    response = web.session.post(
+        endpoint,
+        data=payload,
+        headers={
+            "X-CSRF-Token": csrf,
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": BASE_URL,
+            "Referer": f"{BASE_URL}/dashboard?currentView=dashboard",
+            "Accept": "*/*",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        },
+        timeout=(10, 90),
+        allow_redirects=True,
+    )
+    if "/auth/login" in response.url:
+        raise RuntimeError("Advocate Diaries web session expired during hearing update")
+    if response.status_code >= 400:
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:800]}")
+    low = response.text.casefold()
+    if any(marker in low for marker in ("error", "invalid", "failed", "unauthorized")) and "success" not in low:
+        raise RuntimeError(f"Advocate Diaries rejected update: {response.text[:800]}")
+    return response
 
 
 def writeback_hearing(
-    *, live_hearing_id: int, case_number: str, next_date: date | None,
-    next_purpose: str, order_summary: str, documents_required: str,
+    *, live_hearing_id: int, case_number: str, hearing_date: date,
+    next_date: date | None, next_purpose: str, order_summary: str, documents_required: str,
+    remote_case_id: str | None = None, previous_hearing_date: str | None = None,
 ) -> WritebackResult:
     ensure_sync_queue()
-    payload = _build_payload(next_date, next_purpose, order_summary, documents_required)
-    try:
-        remote_id, _ = find_remote_case(case_number)
-        if not remote_id:
-            qid = queue_writeback(live_hearing_id, case_number, payload, "Matching Advocate Diaries case ID not found")
-            return WritebackResult("QUEUED", f"Matching Advocate Diaries case not found; queued as #{qid}.")
+    if next_date is None:
+        return WritebackResult("SKIPPED", "Disposed matter: no next-hearing date was submitted to Advocate Diaries.")
 
-        endpoint_template = os.getenv("AD_CASE_UPDATE_ENDPOINT", "/court_cases/{id}")
-        endpoint = endpoint_template.format(id=remote_id)
-        if not endpoint.startswith("http"):
-            endpoint = f"{BASE_URL}{endpoint if endpoint.startswith('/') else '/' + endpoint}"
-        method = os.getenv("AD_CASE_UPDATE_METHOD", "PATCH").upper()
-        client = AdvocateDiaries()
-        response = requests.request(method, endpoint, json=payload, headers=client.headers(), timeout=(10, 60))
-        if response.status_code >= 400:
-            detail = response.text[:1000]
-            raise RuntimeError(f"HTTP {response.status_code}: {detail}")
-        return WritebackResult("SUCCESS", "Advocate Diaries updated.", remote_case_id=remote_id, endpoint=endpoint)
+    web = AdvocateWeb()
+    provisional = {
+        "case_number": case_number,
+        "case_date": hearing_date.isoformat(),
+        "next_hearing_date": next_date.isoformat(),
+        "purpose": next_purpose,
+        "remarks": order_summary,
+        "work": documents_required,
+    }
+    try:
+        found_id, record, csrf = find_remote_case(web, case_number, hearing_date)
+        remote_id = remote_case_id or found_id
+        if not remote_id:
+            raise RuntimeError(f"Matching Advocate Diaries case UUID not found on {hearing_date.isoformat()}")
+        payload = _payload(
+            remote_id=remote_id,
+            current_case_date=hearing_date,
+            previous_hearing_date=previous_hearing_date or (record or {}).get("previous_hearing_date", ""),
+            next_date=next_date,
+            next_purpose=next_purpose,
+            order_summary=order_summary,
+            documents_required=documents_required,
+        )
+        _post(web, payload, csrf)
+        verified = _verify(web, case_number, next_date)
+        message = "Advocate Diaries hearing updated and verified." if verified else "Advocate Diaries accepted the hearing update; verification is pending."
+        return WritebackResult("SUCCESS", message, remote_case_id=remote_id,
+                               endpoint=f"{BASE_URL}/hearings/add-dashboard-hearing", verified=verified)
     except Exception as exc:
-        qid = queue_writeback(live_hearing_id, case_number, payload, f"{type(exc).__name__}: {exc}")
-        return WritebackResult("QUEUED", f"Write-back queued as #{qid}: {type(exc).__name__}: {exc}")
+        qid = queue_writeback(live_hearing_id, case_number, provisional, f"{type(exc).__name__}: {exc}", remote_case_id)
+        return WritebackResult("QUEUED", f"Advocate Diaries sync queued as #{qid}: {type(exc).__name__}: {exc}", remote_case_id=remote_case_id)
 
 
 def retry_pending(limit: int = 20) -> dict[str, int]:
@@ -155,27 +245,35 @@ def retry_pending(limit: int = 20) -> dict[str, int]:
     stats = {"processed": 0, "success": 0, "failed": 0}
     try:
         cur.execute("""
-        SELECT id,live_hearing_id,case_number,payload FROM advocate_diaries_sync_queue
+        SELECT id,live_hearing_id,case_number,remote_case_id,payload
+        FROM advocate_diaries_sync_queue
         WHERE status='PENDING' AND (next_retry_at IS NULL OR next_retry_at<=CURRENT_TIMESTAMP)
         ORDER BY id LIMIT %s
         """, (limit,))
         rows = cur.fetchall()
-        for queue_id, live_id, case_number, payload in rows:
+        for queue_id, live_id, case_number, remote_id, payload in rows:
             stats["processed"] += 1
             try:
-                remote_id, _ = find_remote_case(case_number)
-                if not remote_id:
-                    raise RuntimeError("Matching case ID not found")
-                endpoint_template = os.getenv("AD_CASE_UPDATE_ENDPOINT", "/court_cases/{id}")
-                endpoint = endpoint_template.format(id=remote_id)
-                if not endpoint.startswith("http"):
-                    endpoint = f"{BASE_URL}{endpoint if endpoint.startswith('/') else '/' + endpoint}"
-                method = os.getenv("AD_CASE_UPDATE_METHOD", "PATCH").upper()
-                client = AdvocateDiaries()
-                r = requests.request(method, endpoint, json=payload, headers=client.headers(), timeout=(10,60))
-                if r.status_code >= 400:
-                    raise RuntimeError(f"HTTP {r.status_code}: {r.text[:500]}")
-                cur.execute("UPDATE advocate_diaries_sync_queue SET status='SUCCESS',remote_case_id=%s,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=%s", (remote_id, queue_id))
+                case_date = date.fromisoformat(payload["case_date"])
+                next_date = date.fromisoformat(payload["next_hearing_date"])
+                result = writeback_hearing(
+                    live_hearing_id=live_id,
+                    case_number=case_number,
+                    remote_case_id=remote_id,
+                    hearing_date=case_date,
+                    next_date=next_date,
+                    next_purpose=payload.get("purpose", ""),
+                    order_summary=payload.get("remarks", ""),
+                    documents_required=payload.get("work", ""),
+                )
+                if result.status != "SUCCESS":
+                    raise RuntimeError(result.message)
+                cur.execute("""
+                    UPDATE advocate_diaries_sync_queue
+                    SET status='SUCCESS',remote_case_id=%s,completed_at=CURRENT_TIMESTAMP,
+                        updated_at=CURRENT_TIMESTAMP,last_error=NULL
+                    WHERE id=%s
+                """, (result.remote_case_id, queue_id))
                 conn.commit(); stats["success"] += 1
             except Exception as exc:
                 cur.execute("""

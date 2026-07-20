@@ -293,6 +293,7 @@ def complete_live_hearing(
                 ad_sync = writeback_hearing(
                     live_hearing_id=hearing_id,
                     case_number=case_number,
+                    hearing_date=hearing.get("hearing_date"),
                     next_date=next_date,
                     next_purpose=next_purpose,
                     order_summary=order_summary,
