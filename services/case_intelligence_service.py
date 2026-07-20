@@ -91,18 +91,33 @@ def advocate_diaries_pending_cases() -> list[dict[str, Any]]:
         case_id = (row.get("id") or "").removeprefix("case_").strip()
         case_cell, court_cell, hearing_cell = cells[1], cells[2], cells[3]
 
-        case_lines = [" ".join(x.get_text(" ", strip=True).split()) for x in case_cell.select("div")]
+        # Read only the immediate field rows inside each wrapper.  Using
+        # ``select("div")`` recursively caused the wrapper text to absorb Case
+        # Type, Case Number and status into the case title.
+        case_wrapper = case_cell.select_one(".table_col_wrapper") or case_cell
+        case_lines = [
+            " ".join(x.get_text(" ", strip=True).split())
+            for x in case_wrapper.find_all("div", recursive=False)
+        ]
         title_line = next((x for x in case_lines if x.lower().startswith("case title:")), "")
         number_line = next((x for x in case_lines if x.lower().startswith("case number:")), "")
         type_line = next((x for x in case_lines if x.lower().startswith("case type:")), "")
 
-        court_lines = [" ".join(x.get_text(" ", strip=True).split()) for x in court_cell.select("div")]
+        court_wrapper = court_cell.select_one(".table_col_wrapper") or court_cell
+        court_lines = [
+            " ".join(x.get_text(" ", strip=True).split())
+            for x in court_wrapper.find_all("div", recursive=False)
+        ]
         court_line = next((x for x in court_lines if x.lower().startswith("court:")), "")
         judge_line = next((x for x in court_lines if x.lower().startswith("judge:")), "")
 
-        next_hearing_node = hearing_cell.select_one("span.blinking")
+        hearing_wrapper = hearing_cell.select_one(".table_col_wrapper") or hearing_cell
+        next_hearing_node = hearing_wrapper.select_one("span.blinking")
         next_hearing = next_hearing_node.get_text(" ", strip=True) if next_hearing_node else ""
-        hearing_lines = [" ".join(x.get_text(" ", strip=True).split()) for x in hearing_cell.select("div")]
+        hearing_lines = [
+            " ".join(x.get_text(" ", strip=True).split())
+            for x in hearing_wrapper.find_all("div", recursive=False)
+        ]
         purpose_line = next((x for x in hearing_lines if x.lower().startswith("purpose:")), "")
         previous_line = next((x for x in hearing_lines if x.lower().startswith("previous hearing:")), "")
 
@@ -185,7 +200,7 @@ def render_updated_cases(rows: list[dict[str, Any]], *, include_header: bool = T
             f"📅 {date.today().strftime('%d %b %Y')}", "",
             "Jimmy, please update the following physical files:", "",
         ])
-    lines.append(f"✅ <b>UPDATED CASES — {len(rows)}</b>")
+    lines.append(f"✅ <b>NEXT DATES RECORDED TODAY — {len(rows)}</b>")
     lines.append("")
     if not rows:
         lines.append("No next-date or purpose updates were recorded today.")
@@ -208,7 +223,9 @@ def render_pending_cases(rows: list[dict[str, Any]], *, heading: str = "PENDING 
         missing = ", ".join(row.get("missing") or ["Update pending"])
         lines.append(f"{i}. <b>{html.escape(str(row['case_title']))}</b>")
         lines.append(f"   {html.escape(str(row['case_number']))}")
-        lines.append(f"   Missing: <b>{html.escape(missing)}</b>")
+        lines.append(f"   Previous: <b>{html.escape(_fmt_date(row.get('previous_hearing')))}</b>")
+        lines.append(f"   Purpose: <b>{html.escape(str(row.get('next_purpose') or 'Not entered'))}</b>")
+        lines.append("   Pending: <b>Next hearing date update</b>")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -221,7 +238,7 @@ def render_office_report(updated: list[dict[str, Any]], pending: list[dict[str, 
         f"{render_updated_cases(updated, include_header=False)}\n\n"
         "────────────────────\n\n"
         f"{render_pending_cases(pending)}\n\n"
-        f"<b>Summary: {len(updated)} updated · {len(pending)} pending</b>"
+        f"<b>Summary: {len(updated)} next dates recorded today · {len(pending)} pending</b>"
     )
 
 
