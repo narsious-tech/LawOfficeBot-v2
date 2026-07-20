@@ -12,9 +12,12 @@ from telegram.ext import ContextTypes
 
 from advocate_web import AdvocateWeb
 from commands.dashboard import fetch_advocate_diaries_cause_groups
+from services.case_intelligence_service import staff_telegram_id
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
+PAGE_SIZE = 8
+RECIPIENTS = ("Preet", "Priya", "Happy", "Jimmy")
 
 
 def _target_date():
@@ -30,80 +33,122 @@ def _safe(value, fallback="-"):
     return text or fallback
 
 
+def _flatten_cases(groups):
+    rows = []
+    for group in groups:
+        for case in group.get("cases") or []:
+            rows.append({
+                "case_number": _safe(case.get("case_number"), "Case number not entered"),
+                "case_title": _safe(case.get("case_title"), "Title not recorded"),
+                "purpose": _safe(case.get("stage") or case.get("purpose"), "Purpose not recorded"),
+                "owner": _safe(case.get("owner_name") or case.get("owner"), "Not assigned"),
+                "court": _safe(group.get("court_name"), "Court not recorded"),
+                "judge": _safe(group.get("judge_name"), "Judge not recorded"),
+                "floor": _safe(group.get("floor"), "-"),
+                "room": _safe(group.get("room"), "-"),
+            })
+    return rows
+
+
 def _physical_file_text(groups, target):
     lines = [
         "📁 PHYSICAL FILE PREPARATION",
         f"📅 {target.strftime('%d %b %Y')}",
-        f"Total files: {_case_count(groups)}",
+        f"Tomorrow's hearings: {_case_count(groups)}",
         "",
+        "Select only the physical files that staff must bring to the evening office.",
+        "Use the case-wise buttons below, then press ‘Send selected files’."
     ]
-    serial = 1
-    for group in groups:
-        court = _safe(group.get("court_name"), "Court not recorded")
-        floor = _safe(group.get("floor"), "-")
-        room = _safe(group.get("room"), "-")
-        judge = _safe(group.get("judge_name"), "Judge not recorded")
-        lines.append(f"⚖️ {court} | Floor {floor} | Room {room}")
-        lines.append(f"Judge: {judge}")
-        for case in group.get("cases") or []:
-            number = _safe(case.get("case_number"), "Case number not entered")
-            title = _safe(case.get("case_title"), "Title not recorded")
-            purpose = _safe(case.get("stage") or case.get("purpose"), "Purpose not recorded")
-            owner = _safe(case.get("owner_name") or case.get("owner"), "Not assigned")
-            lines.extend([
-                f"{serial}. {number}",
-                f"   {title}",
-                f"   Purpose: {purpose} | Owner: {owner}",
-            ])
-            serial += 1
-        lines.append("")
-
-    lines.extend([
-        "✅ FILE-PREPARATION CHECK-INS",
-        "☐ Files removed from cupboard",
-        "☐ Previous orders and brief checked",
-        "☐ Fresh documents/evidence attached",
-        "☐ Files placed in tomorrow's tray",
-    ])
-    return "\n".join(lines).strip()
-
-
-def _checkin_keyboard(target):
-    key = target.isoformat()
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣ Files removed", callback_data=f"efd:{key}:removed")],
-        [InlineKeyboardButton("2️⃣ Briefs/orders checked", callback_data=f"efd:{key}:checked")],
-        [InlineKeyboardButton("3️⃣ Tomorrow tray ready", callback_data=f"efd:{key}:ready")],
-    ])
-
-
-def _state(context, chat_id, target):
-    all_states = context.application.bot_data.setdefault("evening_file_checkins", {})
-    return all_states.setdefault(f"{chat_id}:{target.isoformat()}", {})
-
-
-def _status_text(state):
-    labels = [
-        ("removed", "Files removed from cupboard"),
-        ("checked", "Briefs/orders/documents checked"),
-        ("ready", "Files placed in tomorrow's tray"),
-    ]
-    lines = ["📁 PHYSICAL FILE READINESS"]
-    for key, label in labels:
-        item = state.get(key)
-        if item:
-            lines.append(f"✅ {label} — {item['by']} at {item['time']}")
-        else:
-            lines.append(f"☐ {label}")
-    completed = sum(1 for key, _ in labels if state.get(key))
-    lines.append(f"\nProgress: {completed}/3")
     return "\n".join(lines)
 
 
+def _selection_store(context, chat_id, target):
+    all_states = context.application.bot_data.setdefault("evening_file_selections", {})
+    return all_states.setdefault(f"{chat_id}:{target.isoformat()}", {"selected": set(), "cases": []})
+
+
+def _selection_text(state, target, page=0):
+    cases = state.get("cases") or []
+    selected = state.get("selected") or set()
+    pages = max(1, (len(cases) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    start = page * PAGE_SIZE
+    end = min(len(cases), start + PAGE_SIZE)
+    lines = [
+        "☑️ SELECT FILES TO BRING",
+        f"📅 {target.strftime('%d %b %Y')}",
+        f"Selected: {len(selected)} of {len(cases)}",
+        f"Page: {page + 1}/{pages}",
+        "",
+    ]
+    for idx in range(start, end):
+        case = cases[idx]
+        mark = "✅" if idx in selected else "⬜"
+        lines.extend([
+            f"{mark} {idx + 1}. {case['case_number']}",
+            f"   {case['case_title']}",
+            f"   {case['court']} | Floor {case['floor']} | Room {case['room']}",
+            f"   Purpose: {case['purpose']}",
+            "",
+        ])
+    if not cases:
+        lines.append("No hearings were found for tomorrow.")
+    return "\n".join(lines).strip()
+
+
+def _selection_keyboard(state, target, page=0):
+    cases = state.get("cases") or []
+    selected = state.get("selected") or set()
+    pages = max(1, (len(cases) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    start = page * PAGE_SIZE
+    end = min(len(cases), start + PAGE_SIZE)
+    rows = []
+    for idx in range(start, end):
+        symbol = "✅" if idx in selected else "⬜"
+        number = cases[idx]["case_number"]
+        label = f"{symbol} {idx + 1}. {number}"[:55]
+        rows.append([InlineKeyboardButton(label, callback_data=f"efs:{target.isoformat()}:t:{idx}:{page}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"efs:{target.isoformat()}:p:{page - 1}"))
+    if page + 1 < pages:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"efs:{target.isoformat()}:p:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(
+        f"📤 Send {len(selected)} selected files",
+        callback_data=f"efs:{target.isoformat()}:send:{page}",
+    )])
+    rows.append([InlineKeyboardButton("🧹 Clear selection", callback_data=f"efs:{target.isoformat()}:clear:{page}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _assigned_list_text(cases, selected, target, assigned_by):
+    lines = [
+        "📁 FILES TO BRING TO EVENING OFFICE",
+        f"📅 {target.strftime('%d %b %Y')}",
+        f"Assigned by: {assigned_by}",
+        f"Total selected files: {len(selected)}",
+        "",
+    ]
+    for serial, idx in enumerate(sorted(selected), 1):
+        case = cases[idx]
+        lines.extend([
+            f"{serial}. {case['case_number']}",
+            f"   {case['case_title']}",
+            f"   Court: {case['court']}",
+            f"   Judge: {case['judge']}",
+            f"   Floor {case['floor']} | Room {case['room']}",
+            f"   Purpose: {case['purpose']}",
+            "",
+        ])
+    lines.append("Please arrange and bring only the above-selected physical files.")
+    return "\n".join(lines).strip()
+
+
 async def _official_pdf(target):
-    pdf_bytes = await asyncio.to_thread(
-        AdvocateWeb().download_day_cases_pdf, target.isoformat()
-    )
+    pdf_bytes = await asyncio.to_thread(AdvocateWeb().download_day_cases_pdf, target.isoformat())
     path = os.path.join(tempfile.gettempdir(), f"Case-{target.isoformat()}.pdf")
     with open(path, "wb") as handle:
         handle.write(pdf_bytes)
@@ -118,16 +163,10 @@ async def printablecauselist(update: Update, context: ContextTypes.DEFAULT_TYPE)
         path = await _official_pdf(target)
     except Exception as exc:
         logger.exception("Official Advocate Diaries PDF download failed")
-        await update.effective_message.reply_text(
-            f"⚠️ Official Advocate Diaries cause-list PDF could not be downloaded: {exc}"
-        )
+        await update.effective_message.reply_text(f"⚠️ Official Advocate Diaries cause-list PDF could not be downloaded: {exc}")
         return
     with open(path, "rb") as file_handle:
-        await update.effective_message.reply_document(
-            file_handle,
-            filename=os.path.basename(path),
-            caption=f"Official Advocate Diaries cause list — {target.strftime('%d %b %Y')}",
-        )
+        await update.effective_message.reply_document(file_handle, filename=os.path.basename(path), caption=f"Official Advocate Diaries cause list — {target.strftime('%d %b %Y')}")
 
 
 async def eveningdashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -135,33 +174,81 @@ async def eveningdashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def filesready(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target = _target_date()
-    state = _state(context, update.effective_chat.id, target)
-    now = datetime.now(IST)
-    by = update.effective_user.full_name or str(update.effective_user.id)
-    for key in ("removed", "checked", "ready"):
-        state[key] = {"by": by, "time": now.strftime("%I:%M %p")}
-    await update.effective_message.reply_text(
-        _status_text(state), reply_markup=_checkin_keyboard(target)
-    )
+    await update.effective_message.reply_text("Use the case-wise checkboxes in /eveningdashboard and press ‘Send selected files’. The selected list is sent to Preet, Priya, Happy and Jimmy.")
 
 
-async def evening_file_checkin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def evening_file_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     try:
-        _, date_text, step = query.data.split(":", 2)
+        parts = query.data.split(":")
+        date_text = parts[1]
+        action = parts[2]
         target = datetime.strptime(date_text, "%Y-%m-%d").date()
     except Exception:
-        await query.answer("Invalid check-in", show_alert=True)
+        await query.answer("Invalid selection", show_alert=True)
         return
-    state = _state(context, query.message.chat.id, target)
-    now = datetime.now(IST)
-    by = query.from_user.full_name or str(query.from_user.id)
-    state[step] = {"by": by, "time": now.strftime("%I:%M %p")}
-    await query.edit_message_text(
-        _status_text(state), reply_markup=_checkin_keyboard(target)
-    )
+
+    state = _selection_store(context, query.message.chat.id, target)
+    cases = state.get("cases") or []
+    selected = state.setdefault("selected", set())
+
+    if action == "t":
+        idx = int(parts[3])
+        page = int(parts[4])
+        if idx < 0 or idx >= len(cases):
+            await query.answer("Case is no longer available", show_alert=True)
+            return
+        if idx in selected:
+            selected.remove(idx)
+        else:
+            selected.add(idx)
+        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        return
+
+    if action == "p":
+        page = int(parts[3])
+        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        return
+
+    if action == "clear":
+        page = int(parts[3])
+        selected.clear()
+        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        return
+
+    if action == "send":
+        page = int(parts[3])
+        if not selected:
+            await query.answer("Select at least one file first.", show_alert=True)
+            return
+        assigned_by = query.from_user.full_name or str(query.from_user.id)
+        text = _assigned_list_text(cases, selected, target, assigned_by)
+        delivered, missing = [], []
+        for name in RECIPIENTS:
+            telegram_id = await asyncio.to_thread(staff_telegram_id, name)
+            if not telegram_id:
+                missing.append(name)
+                continue
+            try:
+                for start in range(0, len(text), 3900):
+                    await context.bot.send_message(chat_id=telegram_id, text=text[start:start + 3900])
+                delivered.append(name)
+            except Exception:
+                logger.exception("Could not send selected file list to %s", name)
+                missing.append(name)
+        confirmation = f"✅ Selected file list sent to: {', '.join(delivered) or 'nobody'}."
+        if missing:
+            confirmation += f"\n⚠️ Telegram account not linked/reachable: {', '.join(missing)}."
+        await context.bot.send_message(chat_id=query.message.chat.id, text=confirmation)
+        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        return
+
+
+# Backward-compatible old callback. Existing old dashboard buttons will not crash.
+async def evening_file_checkin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("This checklist has been replaced by case-wise file selection.", show_alert=True)
 
 
 async def send_evening_dashboard(context, chat_id=None, force=False):
@@ -176,38 +263,30 @@ async def send_evening_dashboard(context, chat_id=None, force=False):
     text = (
         "🌆 EVENING OPERATIONS DASHBOARD\n"
         f"📅 Tomorrow: {target.strftime('%d %b %Y')}\n"
-        f"⚖️ Hearings / physical files: {total}\n"
+        f"⚖️ Hearings: {total}\n"
         f"🔗 Cause-list source: Advocate Diaries {source}\n\n"
-        "Jimmy: use the check-ins below while preparing tomorrow's physical files."
+        "Select only the files that must be brought to the evening office. "
+        "The final selected list will be sent to Preet, Priya, Happy and Jimmy."
     )
     await context.bot.send_message(chat_id=destination, text=text)
+    await context.bot.send_message(chat_id=destination, text=_physical_file_text(groups, target))
 
-    physical_text = _physical_file_text(groups, target)
-    for start in range(0, len(physical_text), 3900):
-        await context.bot.send_message(chat_id=destination, text=physical_text[start:start + 3900])
-
-    state = _state(context, destination, target)
+    state = _selection_store(context, destination, target)
+    state["cases"] = _flatten_cases(groups)
+    state.setdefault("selected", set())
     await context.bot.send_message(
         chat_id=destination,
-        text=_status_text(state),
-        reply_markup=_checkin_keyboard(target),
+        text=_selection_text(state, target, 0),
+        reply_markup=_selection_keyboard(state, target, 0),
     )
 
     try:
         path = await _official_pdf(target)
         with open(path, "rb") as file_handle:
-            await context.bot.send_document(
-                chat_id=destination,
-                document=file_handle,
-                filename=os.path.basename(path),
-                caption="📎 Official Advocate Diaries cause list attached",
-            )
+            await context.bot.send_document(chat_id=destination, document=file_handle, filename=os.path.basename(path), caption="📎 Official Advocate Diaries cause list attached")
     except Exception as exc:
         logger.exception("Official cause-list PDF could not be attached")
-        await context.bot.send_message(
-            chat_id=destination,
-            text=f"⚠️ Official Advocate Diaries PDF could not be attached: {exc}",
-        )
+        await context.bot.send_message(chat_id=destination, text=f"⚠️ Official Advocate Diaries PDF could not be attached: {exc}")
 
 
 async def evening_dashboard_job(context):
