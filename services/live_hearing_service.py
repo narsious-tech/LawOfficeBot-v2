@@ -158,6 +158,14 @@ def set_live_hearing_status(hearing_id: int, new_status: str, changed_by: int | 
 
 
 
+def _table_columns(cur, table_name: str) -> set[str]:
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name=%s
+    """, (table_name,))
+    return {r[0] for r in cur.fetchall()}
+
+
 def complete_live_hearing(
     hearing_id: int,
     *,
@@ -169,9 +177,10 @@ def complete_live_hearing(
     notify_client: bool,
     changed_by: int | None,
 ):
-    """Atomically record a hearing outcome and mirror it into office records."""
+    """Persist the core outcome atomically; optional mirrors use savepoints and cannot block saving."""
     ensure_live_hearing_tables()
     conn = _connect(); cur = conn.cursor(cursor_factory=RealDictCursor)
+    warnings = []
     try:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS hearing_completions (
@@ -198,53 +207,87 @@ def complete_live_hearing(
                 updated_by=%s, updated_at=CURRENT_TIMESTAMP
             WHERE id=%s
         """, (final_status, order_summary, changed_by, hearing_id))
-        task_id = None
-        case_number = hearing.get("case_number") or ""
-        if next_date and case_number:
-            cur.execute("""
-                UPDATE cases SET next_hearing=%s
-                WHERE LOWER(TRIM(COALESCE(case_number,'')))=LOWER(TRIM(%s))
-                   OR LOWER(TRIM(COALESCE(case_id,'')))=LOWER(TRIM(%s))
-            """, (next_date, case_number, case_number))
-        if create_task and documents_required.strip() and documents_required.strip().lower() not in {"none","nil","no","-"}:
-            cur.execute("""
-                INSERT INTO tasks(case_number, assigned_to, task, deadline, status)
-                VALUES (%s, %s, %s, %s, 'PENDING') RETURNING id
-            """, (case_number, hearing.get("assigned_to"), documents_required.strip(), next_date.isoformat() if next_date else None))
-            task_id = cur.fetchone()[0]
         cur.execute("""
             INSERT INTO hearing_completions(
                 live_hearing_id,next_date,next_purpose,order_summary,documents_required,
-                task_created_id,notify_client,completed_by
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                notify_client,completed_by
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (live_hearing_id) DO UPDATE SET
                 next_date=EXCLUDED.next_date,next_purpose=EXCLUDED.next_purpose,
                 order_summary=EXCLUDED.order_summary,documents_required=EXCLUDED.documents_required,
-                task_created_id=COALESCE(EXCLUDED.task_created_id,hearing_completions.task_created_id),
                 notify_client=EXCLUDED.notify_client,completed_by=EXCLUDED.completed_by,
                 completed_at=CURRENT_TIMESTAMP
-        """, (hearing_id,next_date,next_purpose,order_summary,documents_required,task_id,notify_client,changed_by))
-        # Timeline is deliberately direct and schema-compatible with the existing activity centre.
-        cur.execute("""
-            INSERT INTO client_timeline(
-                case_id,case_number,event_type,event_title,event_details,event_status,event_category,
-                source_type,source_id,created_by,event_at,is_internal
-            ) VALUES (%s,%s,'HEARING_COMPLETED','Hearing completed',%s,%s,'hearing',
-                      'LIVE_HEARING',%s,%s,CURRENT_TIMESTAMP,TRUE)
-            ON CONFLICT DO NOTHING
-        """, (
-            case_number, case_number,
-            f"Order: {order_summary}\nNext date: {next_date or '-'}\nPurpose: {next_purpose or '-'}\nDocuments: {documents_required or '-'}",
-            final_status, str(hearing_id), changed_by,
-        ))
+        """, (hearing_id,next_date,next_purpose,order_summary,documents_required,notify_client,changed_by))
         cur.execute("""
             INSERT INTO live_hearing_events(live_hearing_id,old_status,new_status,note,changed_by)
             VALUES (%s,%s,%s,%s,%s)
         """, (hearing_id, hearing.get('status'), final_status, order_summary, changed_by))
         conn.commit()
+
+        case_number = hearing.get("case_number") or ""
+        task_id = None
+        # Optional case mirror
+        if next_date and case_number:
+            try:
+                cur.execute("SAVEPOINT mirror_case")
+                cols = _table_columns(cur, "cases")
+                date_col = "next_hearing" if "next_hearing" in cols else ("next_hearing_date" if "next_hearing_date" in cols else None)
+                key_cols = [c for c in ("case_number", "case_id") if c in cols]
+                if date_col and key_cols:
+                    where = " OR ".join([f"LOWER(TRIM(COALESCE({c},'')))=LOWER(TRIM(%s))" for c in key_cols])
+                    cur.execute(f"UPDATE cases SET {date_col}=%s WHERE {where}", tuple([next_date] + [case_number]*len(key_cols)))
+                cur.execute("RELEASE SAVEPOINT mirror_case"); conn.commit()
+            except Exception as exc:
+                conn.rollback(); warnings.append(f"Case next date not mirrored: {type(exc).__name__}")
+
+        # Optional task mirror, schema aware
+        if create_task and documents_required.strip() and documents_required.strip().lower() not in {"none","nil","no","-"}:
+            try:
+                cols = _table_columns(cur, "tasks")
+                values = {}
+                for c in ("case_number", "case_id"):
+                    if c in cols: values[c] = case_number
+                if "assigned_to" in cols: values["assigned_to"] = hearing.get("assigned_to")
+                if "task" in cols: values["task"] = documents_required.strip()
+                elif "title" in cols: values["title"] = documents_required.strip()
+                elif "description" in cols: values["description"] = documents_required.strip()
+                if "deadline" in cols: values["deadline"] = next_date
+                elif "due_at" in cols: values["due_at"] = next_date
+                elif "due_date" in cols: values["due_date"] = next_date
+                if "status" in cols: values["status"] = "PENDING"
+                if not any(k in values for k in ("task","title","description")):
+                    raise RuntimeError("tasks table has no task text column")
+                names=list(values); ph=','.join(['%s']*len(names))
+                cur.execute(f"INSERT INTO tasks({','.join(names)}) VALUES ({ph}) RETURNING id", tuple(values[n] for n in names))
+                task_id=cur.fetchone()[0]
+                cur.execute("UPDATE hearing_completions SET task_created_id=%s WHERE live_hearing_id=%s", (task_id, hearing_id))
+                conn.commit()
+            except Exception as exc:
+                conn.rollback(); warnings.append(f"Follow-up task not created: {type(exc).__name__}: {exc}")
+
+        # Optional timeline mirror
+        try:
+            cols = _table_columns(cur, "client_timeline")
+            if cols:
+                values = {}
+                candidates = {
+                    "case_id": case_number, "case_number": case_number, "event_type": "HEARING_COMPLETED",
+                    "event_title": "Hearing completed",
+                    "event_details": f"Order: {order_summary}\nNext date: {next_date or '-'}\nPurpose: {next_purpose or '-'}\nDocuments: {documents_required or '-'}",
+                    "event_status": final_status, "event_category": "hearing", "source_type": "LIVE_HEARING",
+                    "source_id": str(hearing_id), "created_by": changed_by, "is_internal": True,
+                }
+                values = {k:v for k,v in candidates.items() if k in cols}
+                names=list(values); ph=','.join(['%s']*len(names))
+                if names:
+                    cur.execute(f"INSERT INTO client_timeline({','.join(names)}) VALUES ({ph})", tuple(values[n] for n in names))
+                    conn.commit()
+        except Exception as exc:
+            conn.rollback(); warnings.append(f"Timeline not updated: {type(exc).__name__}")
+
         return {**hearing, "status": final_status, "next_date": next_date, "next_purpose": next_purpose,
                 "order_summary": order_summary, "documents_required": documents_required,
-                "task_id": task_id, "notify_client": notify_client}
+                "task_id": task_id, "notify_client": notify_client, "warnings": warnings}
     except Exception:
         conn.rollback(); raise
     finally:
