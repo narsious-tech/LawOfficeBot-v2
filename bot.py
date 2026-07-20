@@ -3133,58 +3133,29 @@ async def case(update, context):
             f"Fetch failed\nStatus: {r.status_code}"
         )
 async def pendingcases(update, context):
-    await update.message.reply_text("Fetching pending cases...")
-
-    ad_login()
-
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}"
-    }
-
-    all_cases = []
-    page = 1
-
-    while True:
-        r = requests.get(
-            f"{AD_API}/court_cases?page={page}",
-            headers=headers
-        )
-
-        if r.status_code == 404:
-            break
-
-        if r.status_code != 200:
-            await update.message.reply_text(
-                f"Failed at page {page}\nStatus: {r.status_code}"
-            )
-            return
-
-        data = r.json()["data"]
-
-        if not data:
-            break
-
-        all_cases.extend(data)
-        page += 1
-
-    pending = []
-
-    for c in all_cases:
-        if str(c.get("status", "")).lower() == "pending":
-            pending.append(c)
-
-    if not pending:
-        await update.message.reply_text("No pending cases.")
-        return
-
-    msg = "\n".join(
-        [f"{c['case_number']} | {c['client_name']}" for c in pending]
+    """Show only Advocate Diaries cases awaiting a next-hearing update."""
+    from telegram.constants import ParseMode
+    from services.case_intelligence_service import (
+        advocate_diaries_pending_cases,
+        render_pending_cases,
+        split_html_message,
     )
 
-    chunk_size = 3500
+    await update.message.reply_text("Fetching Advocate Diaries pending hearing updates...")
+    try:
+        pending = advocate_diaries_pending_cases()
+    except Exception as exc:
+        print(f"Sprint 16.0.2 /pendingcases failed: {exc}")
+        await update.message.reply_text(
+            "Could not read the Advocate Diaries Pending Cases page. "
+            "Please check the Advocate Diaries login/session and Railway logs."
+        )
+        return
 
-    for i in range(0, len(msg), chunk_size):
-        await update.message.reply_text(msg[i:i+chunk_size])
+    text = render_pending_cases(pending, heading="ADVOCATE DIARIES PENDING UPDATES")
+    for chunk in split_html_message(text):
+        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+
 async def searchcase(update, context):
     if len(context.args) == 0:
         await update.message.reply_text("Use /searchcase NAME")
