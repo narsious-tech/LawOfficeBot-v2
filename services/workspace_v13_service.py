@@ -112,25 +112,47 @@ def get_case(case_id: int) -> dict[str, Any] | None:
 
 
 def case_metrics(case_id: int, case_number: str) -> dict[str, Any]:
+    """Return all summary metrics for the unified Case Workspace.
+
+    Optional legacy tables are queried independently so one absent table does
+    not blank the complete workspace.
+    """
     ensure_schema()
+    metrics = {
+        "pending": 0, "completed": 0, "overdue": 0, "timeline": 0,
+        "documents": 0, "receipts": 0, "outstanding": 0.0,
+        "assigned_staff": [],
+    }
     conn = _connect()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""SELECT COUNT(*) FILTER (WHERE UPPER(COALESCE(status,'PENDING'))<>'COMPLETED') pending,
                                   COUNT(*) FILTER (WHERE UPPER(COALESCE(status,'PENDING'))='COMPLETED') completed,
-                                  COUNT(*) FILTER (WHERE UPPER(COALESCE(status,'PENDING'))<>'COMPLETED' AND due_date<CURRENT_DATE) overdue
-                           FROM case_works WHERE case_record_id=%s OR case_number=%s""", (case_id,case_number))
-            work = dict(cur.fetchone())
-            cur.execute("SELECT COUNT(*) total FROM case_hearing_timeline WHERE case_record_id=%s OR case_number=%s", (case_id,case_number))
-            timeline = int(cur.fetchone()["total"])
-            cur.execute("SELECT COUNT(*) total FROM documents WHERE case_id=%s OR case_number=%s", (str(case_id),case_number))
-            docs = int(cur.fetchone()["total"])
-            cur.execute("SELECT COALESCE(SUM(amount),0) total FROM fee_installments WHERE case_number=%s", (case_number,))
-            receipts = cur.fetchone()["total"]
-            return {**work, "timeline":timeline, "documents":docs, "receipts":receipts}
-    except psycopg2.Error:
-        conn.rollback()
-        return {"pending":0,"completed":0,"overdue":0,"timeline":0,"documents":0,"receipts":0}
+                                  COUNT(*) FILTER (WHERE UPPER(COALESCE(status,'PENDING'))<>'COMPLETED' AND due_date<CURRENT_DATE) overdue,
+                                  ARRAY_REMOVE(ARRAY_AGG(DISTINCT assigned_to), NULL) assigned_staff
+                           FROM case_works WHERE case_record_id=%s OR case_number=%s""", (case_id, case_number))
+            row = dict(cur.fetchone() or {})
+            metrics.update({k: row.get(k) or ([]) if k == "assigned_staff" else row.get(k) or 0
+                            for k in ("pending", "completed", "overdue", "assigned_staff")})
+            cur.execute("SELECT COUNT(*) total FROM case_hearing_timeline WHERE case_record_id=%s OR case_number=%s", (case_id, case_number))
+            metrics["timeline"] = int(cur.fetchone()["total"])
+
+            # Documents are optional in older deployments.
+            try:
+                cur.execute("SELECT COUNT(*) total FROM documents WHERE case_id=%s OR case_number=%s", (str(case_id), case_number))
+                metrics["documents"] = int(cur.fetchone()["total"])
+            except psycopg2.Error:
+                conn.rollback()
+
+            # Finance is derived from the case master when available; receipts
+            # are supplemental and never required to render the workspace.
+            try:
+                cur.execute("SELECT COALESCE(fee_agreed,0) agreed, COALESCE(advance_received,0) advance FROM cases WHERE id=%s", (case_id,))
+                fee = cur.fetchone() or {"agreed": 0, "advance": 0}
+                metrics["outstanding"] = max(0.0, float(fee["agreed"] or 0) - float(fee["advance"] or 0))
+            except psycopg2.Error:
+                conn.rollback()
+        return metrics
     finally:
         conn.close()
 
