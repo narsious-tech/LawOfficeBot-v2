@@ -12,7 +12,7 @@ from services.workspace_v13_service import (
     staff_name_for_user, timeline_entries,
 )
 
-BUILD = "Sprint 14.0 Dynamic Case Ownership"
+BUILD = "Sprint 14.0.2 Workspace Responsibility Polish"
 
 def e(v): return html.escape(str(v if v not in (None, "") else "-"))
 def case_key(c): return c.get("case_number") or c.get("case_id") or f"Case {c.get('id')}"
@@ -44,7 +44,8 @@ def health_lines(c,m):
     checks.append((m.get('timeline',0)>0,"Timeline available"))
     checks.append((bool(c.get('drive_folder_link')),"Drive folder linked"))
     checks.append((bool(c.get('client_name')),"Client assigned"))
-    checks.append((bool(m.get('assigned_staff')),"Staff assigned"))
+    checks.append((True,"Case ownership assigned"))
+    checks.append((True,"Work supervision assigned to Priya"))
     return [("✅" if ok else "⚠️",label) for ok,label in checks]
 
 def render_case(c):
@@ -55,7 +56,8 @@ def render_case(c):
         owner_reason=f"Floor {ownership.get('source_floor')}" if ownership.get('source_floor') is not None else 'Missing/invalid floor fallback'
     except Exception:
         case_owner='Preet'; owner_reason='Default fallback'
-    staff=', '.join(m.get('assigned_staff') or []) or 'No Work assignees'
+    work_assignees=', '.join(m.get('assigned_staff') or [])
+    work_assignment_line = f"👥 Active Work assignees: {e(work_assignees)}" if work_assignees else "📋 Active Works: None"
     next_hearing=fmt_date(c.get('next_hearing') or c.get('hearing_date'))
     status=str(c.get('status') or 'OPEN').upper()
     status_icon='🟢' if status in {'OPEN','ACTIVE'} else '⚪'
@@ -63,7 +65,6 @@ def render_case(c):
     if m['overdue']: alerts.append(f"🔴 {m['overdue']} overdue Work(s)")
     if m['pending']: alerts.append(f"🟠 {m['pending']} pending Work(s)")
     if not c.get('drive_folder_link'): alerts.append("📂 Drive folder missing")
-    if not m.get('assigned_staff'): alerts.append("👥 No staff assigned")
     alert_text='\n'.join(f"• {e(x)}" for x in alerts[:4]) if alerts else '• No immediate operational alerts'
     return (
       "⚖️ <b>CASE WORKSPACE</b>\n"f"🧩 {BUILD}\n\n"
@@ -74,8 +75,12 @@ def render_case(c):
       "<b>CASE OVERVIEW</b>\n"
       f"📋 Works: <b>{m['pending']}</b> pending · {m['completed']} completed\n"
       f"📂 Documents: <b>{m['documents']}</b>\n"
-      f"👤 Case Owner: <b>{e(case_owner)}</b> · {e(owner_reason)}\n"
-      f"👥 Work assignees: {e(staff)}\n"
+      "<b>OFFICE RESPONSIBILITY</b>\n"
+      f"👤 Case Owner: <b>{e(case_owner)}</b>\n"
+      f"👩‍💼 Work Supervisor: <b>Priya</b>\n"
+      f"🏢 Assignment Basis: {e(owner_reason)}\n"
+      f"🤖 Assignment Mode: Automatic\n"
+      f"{work_assignment_line}\n\n"
       f"📜 Timeline: <b>{m['timeline']}</b> entries\n"
       f"💰 Outstanding: <b>₹{m['outstanding']:,.0f}</b>\n\n"
       "<b>ATTENTION</b>\n"+alert_text
@@ -149,7 +154,18 @@ async def workspace13_callback(update:Update,context:ContextTypes.DEFAULT_TYPE):
     elif action=='staff':
       ownership=get_case_owner(num,c.get('court_floor') or c.get('floor'),case_record_id=cid,court=c.get('court_name'),judge=c.get('judge_name'))
       reason=f"Court floor {ownership.get('source_floor')}" if ownership.get('source_floor') is not None else 'Missing/invalid floor → Preet'
-      text=f"👥 <b>{e(num)} — CASE TEAM</b>\n\n👤 <b>Current Case Owner: {e(ownership.get('owner_staff'))}</b>\n⚙️ Mode: {e(ownership.get('assignment_mode'))}\n📍 Reason: {e(reason)}\n\n👩‍💼 Work Supervisor: <b>Priya</b>\n📋 Work assignees: {e(', '.join(m.get('assigned_staff') or []) or 'None')}"
+      active_assignees=', '.join(m.get('assigned_staff') or [])
+      work_summary=f"{m.get('pending',0)} pending · {m.get('completed',0)} completed"
+      assignee_text=active_assignees if active_assignees else 'No active Works'
+      text=(f"👥 <b>{e(num)} — CASE TEAM</b>\n\n"
+            f"<b>CASE OWNERSHIP</b>\n"
+            f"👤 Owner: <b>{e(ownership.get('owner_staff') or 'Preet')}</b>\n"
+            f"⚙️ Mode: {e(ownership.get('assignment_mode') or 'AUTO_FLOOR')}\n"
+            f"📍 Basis: {e(reason)}\n\n"
+            f"<b>WORK SUPERVISION</b>\n"
+            f"👩‍💼 Supervisor: <b>Priya</b>\n"
+            f"📋 Works: {e(work_summary)}\n"
+            f"👥 Active assignees: {e(assignee_text)}")
     elif action=='health':
       lines=[f"🩺 <b>{e(num)} — CASE HEALTH</b>",""]+[f"{icon} {e(label)}" for icon,label in health_lines(c,m)]
       text='\n'.join(lines)
