@@ -51,6 +51,11 @@ from commands.client_timeline import (
 from api_explorer import run_api_explorer
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
+
+from commands.workspace_v13 import (
+    caseworkspace13, workboard, myworks, workspace13_callback,
+)
+
 from commands.works import (
     works,
     work,
@@ -3659,6 +3664,12 @@ app.add_handler(CommandHandler("mychatid", mychatid))
 app.add_handler(
     CommandHandler("testcausejob", test_cause_job)
 )
+
+app.add_handler(CommandHandler("caseworkspace", caseworkspace13))
+app.add_handler(CommandHandler("workboard", workboard))
+app.add_handler(CommandHandler("myworks", myworks))
+app.add_handler(CallbackQueryHandler(workspace13_callback, pattern=r"^s13:"))
+
 app.add_handler(CommandHandler("works", works))
 app.add_handler(CommandHandler("work", work))
 app.add_handler(CommandHandler("completework", completework))
