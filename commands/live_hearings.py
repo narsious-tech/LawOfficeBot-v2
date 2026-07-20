@@ -59,7 +59,7 @@ def _detail_keyboard(hearing_id, page=0):
 def _board_text(rows, source=None, page=0):
     now = datetime.now(IST)
     page, pages, visible = _page_bounds(rows, page)
-    lines = ["⚖️ LIVE HEARING CONTROL", f"📅 {now:%d-%m-%Y}  •  🕘 {now:%I:%M %p} IST", "🧩 Sprint 12.2.5 Assigned Hearing Works"]
+    lines = ["⚖️ LIVE HEARING CONTROL", f"📅 {now:%d-%m-%Y}  •  🕘 {now:%I:%M %p} IST", "🧩 Sprint 12.2.6 Completion Flow Cleanup"]
     if source:
         lines.append(f"🔗 Synced via Advocate Diaries {source}")
     lines.append("")
@@ -175,15 +175,22 @@ async def completion_documents(update: Update, context: ContextTypes.DEFAULT_TYP
         data["work_assigned_to"] = None
         data["work_due_date"] = None
         data["work_priority"] = None
+        data["notify"] = False
+        summary = "\n".join([
+            "✅ CONFIRM HEARING OUTCOME", "",
+            f"📅 Next date: {data.get('next_date') or '-'}",
+            f"📍 Purpose: {data.get('purpose') or '-'}",
+            f"📝 Order: {data.get('order') or '-'}",
+            "",
+            "📋 Work: None",
+            "ℹ️ No work will be created.",
+        ])
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📲 Queue client update", callback_data="lhcw:notify:yes"),
-            InlineKeyboardButton("Internal only", callback_data="lhcw:notify:no"),
+            InlineKeyboardButton("✅ Save completion", callback_data="lhcw:confirm"),
+            InlineKeyboardButton("❌ Cancel", callback_data="lhcw:cancel"),
         ]])
-        await update.effective_message.reply_text(
-            "No work will be created. Should this outcome be flagged for a client update?",
-            reply_markup=kb,
-        )
-        return NOTIFY
+        await update.effective_message.reply_text(summary, reply_markup=kb)
+        return CONFIRM
 
     data["documents"] = text
     from services.live_hearing_service import list_active_staff
@@ -311,11 +318,11 @@ async def completion_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
         lines = ["✅ HEARING COMPLETION SAVED", "", f"🔢 {result.get('case_number') or '-'}", f"📊 Status: {STATUS_LABELS.get(result.get('status'), result.get('status'))}", f"📅 Next date: {result.get('next_date') or '-'}"]
         lines += [
             "",
-            "🔗 LOCAL SYNCHRONIZATION",
-            f"✅ Master case updated: #{result.get('case_record_id')}",
-            f"✅ Timeline updated: #{result.get('timeline_id')}",
-            (f"✅ Work created: #{result.get('work_id')}" if result.get('work_id') else "ℹ️ No preparation work required"),
-                        f"✅ Audit log written: #{result.get('audit_id')}",
+            "🔗 SYNCHRONIZATION",
+            "✅ Master case updated",
+            "✅ Timeline updated",
+            ("✅ Assigned work created" if result.get('work_id') else "ℹ️ Work: None"),
+            "✅ Audit log written",
         ]
         if result.get("notify_client"):
             lines.append("📲 Client update flagged")
