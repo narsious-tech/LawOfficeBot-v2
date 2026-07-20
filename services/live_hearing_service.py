@@ -285,9 +285,27 @@ def complete_live_hearing(
         except Exception as exc:
             conn.rollback(); warnings.append(f"Timeline not updated: {type(exc).__name__}")
 
+        # Advocate Diaries outbound write-back. Local save remains authoritative if remote sync fails.
+        ad_sync = None
+        if case_number:
+            try:
+                from services.ad_writeback import writeback_hearing
+                ad_sync = writeback_hearing(
+                    live_hearing_id=hearing_id,
+                    case_number=case_number,
+                    next_date=next_date,
+                    next_purpose=next_purpose,
+                    order_summary=order_summary,
+                    documents_required=documents_required,
+                )
+            except Exception as exc:
+                warnings.append(f"Advocate Diaries write-back unavailable: {type(exc).__name__}: {exc}")
+
         return {**hearing, "status": final_status, "next_date": next_date, "next_purpose": next_purpose,
                 "order_summary": order_summary, "documents_required": documents_required,
-                "task_id": task_id, "notify_client": notify_client, "warnings": warnings}
+                "task_id": task_id, "notify_client": notify_client, "warnings": warnings,
+                "ad_sync_status": getattr(ad_sync, "status", None),
+                "ad_sync_message": getattr(ad_sync, "message", None)}
     except Exception:
         conn.rollback(); raise
     finally:
