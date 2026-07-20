@@ -51,41 +51,85 @@ def _ad_token() -> str | None:
 
 
 def advocate_diaries_pending_cases() -> list[dict[str, Any]]:
-    """Read only the dedicated Advocate Diaries Pending Cases page.
+    """Parse the authenticated, server-rendered Advocate Diaries Pending Cases page.
 
-    This intentionally does not treat every court case whose generic status is
-    'pending' as a missing hearing update.
+    Only rows inside ``table#cases-list > tbody`` are accepted.  The generic
+    court-case API is deliberately never used because ``status=pending`` means
+    an active case, not a missing next-hearing update.
     """
+    import re
     from bs4 import BeautifulSoup
     from advocate_web import AdvocateWeb
+
     web = AdvocateWeb()
     response = web.get("/pendingCases")
     response.raise_for_status()
-    soup = BeautifulSoup(response.text, "lxml")
-    pending: list[dict[str, Any]] = []
-    # The page is rendered as one record per table row/card.
-    candidates = soup.select("table tbody tr") or soup.select(".pending-case, .case-row, .card")
-    for node in candidates:
-        text = " ".join(node.get_text(" ", strip=True).split())
-        if not text or "Case Title:" not in text:
-            continue
-        def grab(label: str, stops: tuple[str, ...]) -> str:
-            import re
-            stop = "|".join(re.escape(x) for x in stops)
-            m = re.search(re.escape(label) + r"\s*(.*?)(?=" + stop + r"|$)", text, flags=re.I)
-            return (m.group(1).strip() if m else "")
-        title = grab("Case Title:", ("Case Type:", "Case Number:", "Court:")) or "Untitled case"
-        number = grab("Case Number:", ("Pending", "Court:", "Judge:", "Next Hearing:")) or "Case"
-        next_date = grab("Next Hearing:", ("Purpose:", "Previous Hearing:", "Settlement"))
-        purpose = grab("Purpose:", ("Previous Hearing:", "Settlement", "Paid Amount:"))
-        missing = []
-        if not next_date: missing.append("Next date")
-        if not purpose: missing.append("Next purpose")
-        pending.append({"case_number": number, "case_title": title, "next_date": next_date or None,
-                        "next_purpose": purpose or None,
-                        "missing": missing or ["Advocate Diaries update pending"]})
-    return pending
 
+    final_url = str(getattr(response, "url", "") or "")
+    if final_url and "/pendingCases" not in final_url:
+        raise RuntimeError(f"Advocate Diaries redirected pendingCases to {final_url}")
+
+    soup = BeautifulSoup(response.text, "lxml")
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    table = soup.select_one("table#cases-list")
+    if "Pending Cases" not in title or table is None:
+        raise RuntimeError("Authenticated Pending Cases table was not found")
+
+    rows = table.select("tbody > tr[id^='case_']")
+    pending: list[dict[str, Any]] = []
+
+    def labelled_value(node, label: str) -> str:
+        text = " ".join(node.get_text(" ", strip=True).split())
+        match = re.search(rf"{re.escape(label)}\s*(.*)", text, flags=re.I)
+        return match.group(1).strip() if match else ""
+
+    for row in rows:
+        cells = row.find_all("td", recursive=False)
+        if len(cells) < 4:
+            continue
+
+        case_id = (row.get("id") or "").removeprefix("case_").strip()
+        case_cell, court_cell, hearing_cell = cells[1], cells[2], cells[3]
+
+        case_lines = [" ".join(x.get_text(" ", strip=True).split()) for x in case_cell.select("div")]
+        title_line = next((x for x in case_lines if x.lower().startswith("case title:")), "")
+        number_line = next((x for x in case_lines if x.lower().startswith("case number:")), "")
+        type_line = next((x for x in case_lines if x.lower().startswith("case type:")), "")
+
+        court_lines = [" ".join(x.get_text(" ", strip=True).split()) for x in court_cell.select("div")]
+        court_line = next((x for x in court_lines if x.lower().startswith("court:")), "")
+        judge_line = next((x for x in court_lines if x.lower().startswith("judge:")), "")
+
+        next_hearing_node = hearing_cell.select_one("span.blinking")
+        next_hearing = next_hearing_node.get_text(" ", strip=True) if next_hearing_node else ""
+        hearing_lines = [" ".join(x.get_text(" ", strip=True).split()) for x in hearing_cell.select("div")]
+        purpose_line = next((x for x in hearing_lines if x.lower().startswith("purpose:")), "")
+        previous_line = next((x for x in hearing_lines if x.lower().startswith("previous hearing:")), "")
+
+        title_value = title_line.split(":", 1)[1].strip() if ":" in title_line else "Untitled case"
+        number_value = number_line.split(":", 1)[1].strip() if ":" in number_line else ""
+        purpose_value = purpose_line.split(":", 1)[1].strip() if ":" in purpose_line else ""
+
+        pending.append({
+            "advocate_diaries_id": case_id,
+            "case_number": number_value or "Case number not entered",
+            "case_title": title_value or "Untitled case",
+            "case_type": type_line.split(":", 1)[1].strip() if ":" in type_line else "",
+            "court": court_line.split(":", 1)[1].strip() if ":" in court_line else "",
+            "judge": judge_line.split(":", 1)[1].strip() if ":" in judge_line else "",
+            "next_date": next_hearing or None,
+            "next_purpose": purpose_value or None,
+            "previous_hearing": previous_line.split(":", 1)[1].strip() if ":" in previous_line else "",
+            # Every row is pending because Advocate Diaries itself placed it on
+            # the dedicated "Whom Next Hearing date not updated" page.
+            "missing": ["Advocate Diaries next-hearing update pending"],
+        })
+
+    print(
+        "Sprint 16.0.2 pending parser: "
+        f"url={final_url or '/pendingCases'} title={title!r} rows={len(rows)} parsed={len(pending)}"
+    )
+    return pending
 
 def owner_for_case(case_number: str) -> str:
     with _connect() as con, con.cursor() as cur:
