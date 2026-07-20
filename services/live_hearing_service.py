@@ -20,6 +20,22 @@ def _connect():
     return psycopg2.connect(DATABASE_URL, connect_timeout=15, application_name="law-office-live-hearings")
 
 
+
+def list_active_staff() -> list[str]:
+    conn = _connect(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT staff_name FROM staff_accounts
+            WHERE is_active=TRUE AND COALESCE(TRIM(staff_name),'')<>''
+            ORDER BY LOWER(staff_name)
+        """)
+        return [str(r[0]).strip() for r in cur.fetchall()]
+    except Exception:
+        conn.rollback()
+        return ["Happy", "Jimmy", "Preet", "Priya"]
+    finally:
+        cur.close(); conn.close()
+
 def ensure_live_hearing_tables() -> None:
     conn = _connect(); cur = conn.cursor()
     try:
@@ -297,11 +313,13 @@ def complete_live_hearing(
     next_purpose: str,
     order_summary: str,
     documents_required: str,
-    create_task: bool,
+    work_assigned_to: str | None,
+    work_due_date: date | None,
+    work_priority: str | None,
     notify_client: bool,
     changed_by: int | None,
 ):
-    """Sprint 12.2.4: one local transaction, then verified external AD sync."""
+    """Sprint 12.2.5: save one assigned Work (or none), then verified AD sync."""
     ensure_live_hearing_tables()
     conn = _connect(); cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -364,40 +382,21 @@ def complete_live_hearing(
         prep = (documents_required or "").strip()
         meaningful_prep = bool(prep and prep.lower() not in {"none","nil","no","-","/none"})
         if meaningful_prep:
-            due_date = next_date
+            due_date = work_due_date or next_date
             cur.execute("""
                 INSERT INTO case_works(case_record_id,case_number,live_hearing_id,title,details,
-                    assigned_to,due_date,status,created_by)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,'PENDING',%s)
+                    assigned_to,due_date,priority,status,created_by)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s)
                 ON CONFLICT(live_hearing_id,source) DO UPDATE SET
                     title=EXCLUDED.title,details=EXCLUDED.details,assigned_to=EXCLUDED.assigned_to,
-                    due_date=EXCLUDED.due_date,status='PENDING',updated_at=CURRENT_TIMESTAMP
+                    due_date=EXCLUDED.due_date,priority=EXCLUDED.priority,status='PENDING',updated_at=CURRENT_TIMESTAMP
                 RETURNING id
             """, (case_record_id,case_number,hearing_id,prep,
                   f"Created from hearing completion. Outcome: {order_summary}",
-                  hearing.get("assigned_to"),due_date,changed_by))
+                  work_assigned_to,due_date,(work_priority or 'NORMAL').upper(),changed_by))
             work_id = int(cur.fetchone()["id"])
 
         task_id = None
-        if create_task and meaningful_prep:
-            # The legacy tasks table stores text dates; use an idempotency marker in the task text.
-            marker = f"[HC:{hearing_id}]"
-            cur.execute("SELECT id FROM tasks WHERE task LIKE %s ORDER BY id DESC LIMIT 1", (marker + "%",))
-            existing = cur.fetchone()
-            if existing:
-                task_id = int(existing["id"])
-                cur.execute("""
-                    UPDATE tasks SET case_number=%s,assigned_to=%s,task=%s,deadline=%s,status='PENDING'
-                    WHERE id=%s
-                """, (case_number,hearing.get("assigned_to"),f"{marker} {prep}",
-                      next_date.isoformat() if next_date else None,task_id))
-            else:
-                cur.execute("""
-                    INSERT INTO tasks(case_number,assigned_to,task,deadline,status)
-                    VALUES (%s,%s,%s,%s,'PENDING') RETURNING id
-                """, (case_number,hearing.get("assigned_to"),f"{marker} {prep}",
-                      next_date.isoformat() if next_date else None))
-                task_id = int(cur.fetchone()["id"])
 
         cur.execute("""
             INSERT INTO hearing_completions(
