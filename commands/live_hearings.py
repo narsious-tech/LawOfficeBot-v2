@@ -59,7 +59,7 @@ def _detail_keyboard(hearing_id, page=0):
 def _board_text(rows, source=None, page=0):
     now = datetime.now(IST)
     page, pages, visible = _page_bounds(rows, page)
-    lines = ["⚖️ LIVE HEARING CONTROL", f"📅 {now:%d-%m-%Y}  •  🕘 {now:%I:%M %p} IST", "🧩 Sprint 12.2.1 Stability Release"]
+    lines = ["⚖️ LIVE HEARING CONTROL", f"📅 {now:%d-%m-%Y}  •  🕘 {now:%I:%M %p} IST", "🧩 Sprint 12.2.5 Assigned Hearing Works"]
     if source:
         lines.append(f"🔗 Synced via Advocate Diaries {source}")
     lines.append("")
@@ -132,7 +132,7 @@ async def live_hearing_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await q.edit_message_text(f"❌ Live hearing update failed:\n{type(exc).__name__}: {exc}")
 
 
-NEXT_DATE, PURPOSE, ORDER, DOCUMENTS, CREATE_TASK, NOTIFY, CONFIRM = range(7)
+NEXT_DATE, PURPOSE, ORDER, DOCUMENTS, ASSIGNEE, DUE_DATE, CUSTOM_DUE_DATE, PRIORITY, NOTIFY, CONFIRM = range(10)
 
 async def completion_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -167,18 +167,131 @@ async def completion_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("List documents or preparation required before the next date. Send /none if nothing is required."); return DOCUMENTS
 
 async def completion_documents(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.effective_message.text or "").strip(); context.user_data["hearing_completion"]["documents"] = "" if text.lower() == "/none" else text
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Create task", callback_data="lhcw:task:yes"), InlineKeyboardButton("Skip task", callback_data="lhcw:task:no")]])
-    await update.effective_message.reply_text("Create a follow-up task from the required preparation?", reply_markup=kb); return CREATE_TASK
+    text = (update.effective_message.text or "").strip()
+    none_values = {"/none", "none", "nil", "no", "-"}
+    data = context.user_data["hearing_completion"]
+    if not text or text.lower() in none_values:
+        data["documents"] = ""
+        data["work_assigned_to"] = None
+        data["work_due_date"] = None
+        data["work_priority"] = None
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📲 Queue client update", callback_data="lhcw:notify:yes"),
+            InlineKeyboardButton("Internal only", callback_data="lhcw:notify:no"),
+        ]])
+        await update.effective_message.reply_text(
+            "No work will be created. Should this outcome be flagged for a client update?",
+            reply_markup=kb,
+        )
+        return NOTIFY
 
-async def completion_task_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer(); context.user_data["hearing_completion"]["create_task"] = q.data.endswith(":yes")
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📲 Queue client update", callback_data="lhcw:notify:yes"), InlineKeyboardButton("Internal only", callback_data="lhcw:notify:no")]])
-    await q.edit_message_text("Should this outcome be flagged for a client update?", reply_markup=kb); return NOTIFY
+    data["documents"] = text
+    from services.live_hearing_service import list_active_staff
+    staff = list_active_staff()
+    rows = []
+    for item in staff:
+        rows.append([InlineKeyboardButton(item, callback_data=f"lhcw:assignee:{item}")])
+    rows.append([InlineKeyboardButton("Unassigned", callback_data="lhcw:assignee:__UNASSIGNED__")])
+    await update.effective_message.reply_text(
+        "👤 Assign this work to:", reply_markup=InlineKeyboardMarkup(rows)
+    )
+    return ASSIGNEE
+
+
+async def completion_assignee_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    value = q.data.split(":", 2)[2]
+    context.user_data["hearing_completion"]["work_assigned_to"] = None if value == "__UNASSIGNED__" else value
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Tomorrow", callback_data="lhcw:due:tomorrow")],
+        [InlineKeyboardButton("3 days before hearing", callback_data="lhcw:due:minus3")],
+        [InlineKeyboardButton("7 days before hearing", callback_data="lhcw:due:minus7")],
+        [InlineKeyboardButton("Custom date", callback_data="lhcw:due:custom")],
+    ])
+    await q.edit_message_text("📅 Select the work due date:", reply_markup=kb)
+    return DUE_DATE
+
+
+async def completion_due_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from datetime import timedelta
+    q = update.callback_query; await q.answer()
+    choice = q.data.rsplit(":", 1)[-1]
+    data = context.user_data["hearing_completion"]
+    if choice == "custom":
+        await q.edit_message_text("Enter the work due date as DD-MM-YYYY.")
+        return CUSTOM_DUE_DATE
+    today = datetime.now(IST).date()
+    next_date = data.get("next_date")
+    if choice == "tomorrow":
+        due = today + timedelta(days=1)
+    elif choice == "minus3" and next_date:
+        due = next_date - timedelta(days=3)
+    elif choice == "minus7" and next_date:
+        due = next_date - timedelta(days=7)
+    else:
+        due = next_date or (today + timedelta(days=1))
+    data["work_due_date"] = due
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔴 Urgent", callback_data="lhcw:priority:URGENT"),
+        InlineKeyboardButton("🟠 High", callback_data="lhcw:priority:HIGH"),
+    ], [
+        InlineKeyboardButton("🔵 Normal", callback_data="lhcw:priority:NORMAL"),
+        InlineKeyboardButton("⚪ Low", callback_data="lhcw:priority:LOW"),
+    ]])
+    await q.edit_message_text("🚦 Select work priority:", reply_markup=kb)
+    return PRIORITY
+
+
+async def completion_custom_due_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.effective_message.text or "").strip()
+    try:
+        due = datetime.strptime(text, "%d-%m-%Y").date()
+    except ValueError:
+        await update.effective_message.reply_text("❌ Use DD-MM-YYYY, for example 29-07-2026.")
+        return CUSTOM_DUE_DATE
+    context.user_data["hearing_completion"]["work_due_date"] = due
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔴 Urgent", callback_data="lhcw:priority:URGENT"),
+        InlineKeyboardButton("🟠 High", callback_data="lhcw:priority:HIGH"),
+    ], [
+        InlineKeyboardButton("🔵 Normal", callback_data="lhcw:priority:NORMAL"),
+        InlineKeyboardButton("⚪ Low", callback_data="lhcw:priority:LOW"),
+    ]])
+    await update.effective_message.reply_text("🚦 Select work priority:", reply_markup=kb)
+    return PRIORITY
+
+
+async def completion_priority_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    data = context.user_data["hearing_completion"]
+    data["work_priority"] = q.data.rsplit(":", 1)[-1]
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📲 Queue client update", callback_data="lhcw:notify:yes"),
+        InlineKeyboardButton("Internal only", callback_data="lhcw:notify:no"),
+    ]])
+    await q.edit_message_text("Should this outcome be flagged for a client update?", reply_markup=kb)
+    return NOTIFY
+
 
 async def completion_notify_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer(); data = context.user_data["hearing_completion"]; data["notify"] = q.data.endswith(":yes")
-    summary = (f"✅ CONFIRM HEARING OUTCOME\n\n📅 Next date: {data.get('next_date') or '-'}\n📍 Purpose: {data.get('purpose') or '-'}\n📝 Order: {data.get('order') or '-'}\n📂 Preparation: {data.get('documents') or '-'}\n✅ Create task: {'Yes' if data.get('create_task') else 'No'}\n📲 Client update: {'Yes' if data.get('notify') else 'No'}")
+    work_lines = [f"📋 Work: {data.get('documents') or 'None'}"]
+    if data.get("documents"):
+        work_lines += [
+            f"👤 Assigned to: {data.get('work_assigned_to') or 'Unassigned'}",
+            f"⏰ Due: {data.get('work_due_date') or '-'}",
+            f"🚦 Priority: {data.get('work_priority') or 'NORMAL'}",
+        ]
+    else:
+        work_lines.append("ℹ️ No work will be created.")
+    summary = "\n".join([
+        "✅ CONFIRM HEARING OUTCOME", "",
+        f"📅 Next date: {data.get('next_date') or '-'}",
+        f"📍 Purpose: {data.get('purpose') or '-'}",
+        f"📝 Order: {data.get('order') or '-'}",
+        "", *work_lines,
+        f"📲 Client update: {'Yes' if data.get('notify') else 'No'}",
+    ])
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Save completion", callback_data="lhcw:confirm"), InlineKeyboardButton("❌ Cancel", callback_data="lhcw:cancel")]])
     await q.edit_message_text(summary, reply_markup=kb); return CONFIRM
 
@@ -190,7 +303,7 @@ async def completion_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not data or "hearing_id" not in data:
         await q.edit_message_text("❌ Completion session expired. Open the hearing and try again."); return ConversationHandler.END
     try:
-        result = complete_live_hearing(data["hearing_id"], next_date=data.get("next_date"), next_purpose=data.get("purpose", ""), order_summary=data.get("order", ""), documents_required=data.get("documents", ""), create_task=data.get("create_task", False), notify_client=data.get("notify", False), changed_by=q.from_user.id)
+        result = complete_live_hearing(data["hearing_id"], next_date=data.get("next_date"), next_purpose=data.get("purpose", ""), order_summary=data.get("order", ""), documents_required=data.get("documents", ""), work_assigned_to=data.get("work_assigned_to"), work_due_date=data.get("work_due_date"), work_priority=data.get("work_priority"), notify_client=data.get("notify", False), changed_by=q.from_user.id)
         if not result:
             raise RuntimeError("Hearing record was not found")
         context.user_data.pop("hearing_completion", None)
@@ -202,8 +315,7 @@ async def completion_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"✅ Master case updated: #{result.get('case_record_id')}",
             f"✅ Timeline updated: #{result.get('timeline_id')}",
             (f"✅ Work created: #{result.get('work_id')}" if result.get('work_id') else "ℹ️ No preparation work required"),
-            (f"✅ Follow-up task created: #{result.get('task_id')}" if result.get('task_id') else "ℹ️ Follow-up task not requested"),
-            f"✅ Audit log written: #{result.get('audit_id')}",
+                        f"✅ Audit log written: #{result.get('audit_id')}",
         ]
         if result.get("notify_client"):
             lines.append("📲 Client update flagged")
@@ -239,7 +351,10 @@ def hearing_completion_handler():
             PURPOSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, completion_purpose), CommandHandler("none", completion_purpose)],
             ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, completion_order)],
             DOCUMENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, completion_documents), CommandHandler("none", completion_documents)],
-            CREATE_TASK: [CallbackQueryHandler(completion_task_choice, pattern=r"^lhcw:task:")],
+            ASSIGNEE: [CallbackQueryHandler(completion_assignee_choice, pattern=r"^lhcw:assignee:")],
+            DUE_DATE: [CallbackQueryHandler(completion_due_choice, pattern=r"^lhcw:due:")],
+            CUSTOM_DUE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, completion_custom_due_date)],
+            PRIORITY: [CallbackQueryHandler(completion_priority_choice, pattern=r"^lhcw:priority:")],
             NOTIFY: [CallbackQueryHandler(completion_notify_choice, pattern=r"^lhcw:notify:")],
             CONFIRM: [CallbackQueryHandler(completion_confirm, pattern=r"^lhcw:(confirm|cancel)$")],
         },
