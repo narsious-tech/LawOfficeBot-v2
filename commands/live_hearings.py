@@ -127,6 +127,8 @@ async def live_hearing_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await q.edit_message_text("Hearing not found."); return
             await q.edit_message_text(_detail_text(row), reply_markup=_detail_keyboard(row["id"], page)); return
     except Exception as exc:
+        if "Message is not modified" in str(exc):
+            return
         await q.edit_message_text(f"❌ Live hearing update failed:\n{type(exc).__name__}: {exc}")
 
 
@@ -198,6 +200,15 @@ async def completion_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
             lines.append(f"📋 Follow-up task: #{result['task_id']}")
         if result.get("notify_client"):
             lines.append("📲 Client update flagged")
+        ad_status = result.get("ad_sync_status")
+        if ad_status == "SUCCESS":
+            lines.append("✅ Advocate Diaries updated")
+        elif ad_status == "QUEUED":
+            lines.append("⚠️ Advocate Diaries sync queued")
+            if result.get("ad_sync_message"):
+                lines.append(f"   {result['ad_sync_message']}")
+        elif result.get("ad_sync_message"):
+            lines.append(f"⚠️ Advocate Diaries: {result['ad_sync_message']}")
         if warnings:
             lines += ["", "⚠️ Non-critical notices:"] + [f"• {w}" for w in warnings]
         page = int(data.get("page", 0))
