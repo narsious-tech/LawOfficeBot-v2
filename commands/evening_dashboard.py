@@ -13,6 +13,8 @@ from telegram.ext import ContextTypes
 from advocate_web import AdvocateWeb
 from commands.dashboard import fetch_advocate_diaries_cause_groups
 from services.case_intelligence_service import staff_telegram_id
+from services.role_intelligence_service import save_file_assignments, file_assignments
+from commands.role_intelligence import file_status_keyboard
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -223,6 +225,10 @@ async def evening_file_selection_callback(update: Update, context: ContextTypes.
             await query.answer("Select at least one file first.", show_alert=True)
             return
         assigned_by = query.from_user.full_name or str(query.from_user.id)
+        await asyncio.to_thread(save_file_assignments, target, cases, selected, query.from_user.id, assigned_by)
+        saved_rows = await asyncio.to_thread(file_assignments, target)
+        selected_numbers = {cases[idx]["case_number"] for idx in selected}
+        saved_rows = [row for row in saved_rows if row.get("case_number") in selected_numbers]
         text = _assigned_list_text(cases, selected, target, assigned_by)
         delivered, missing = [], []
         for name in RECIPIENTS:
@@ -233,6 +239,14 @@ async def evening_file_selection_callback(update: Update, context: ContextTypes.
             try:
                 for start in range(0, len(text), 3900):
                     await context.bot.send_message(chat_id=telegram_id, text=text[start:start + 3900])
+                for row in saved_rows:
+                    await context.bot.send_message(
+                        chat_id=telegram_id,
+                        text=(f"📁 {row['case_number']}\n{row.get('case_title') or ''}\n"
+                              f"Court: {row.get('court') or '-'} | Floor {row.get('floor') or '-'} | Room {row.get('room') or '-'}\n"
+                              f"Purpose: {row.get('purpose') or '-'}\nStatus: {row.get('status') or 'SELECTED'}"),
+                        reply_markup=file_status_keyboard(row),
+                    )
                 delivered.append(name)
             except Exception:
                 logger.exception("Could not send selected file list to %s", name)
