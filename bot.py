@@ -54,6 +54,7 @@ from zoneinfo import ZoneInfo
 
 from commands.case_assignment import workcontrol, reconcileassignments
 from commands.case_intelligence import nextdateslist, physical_file_next_dates_job
+from commands.role_intelligence import mydashboard, officestatus, myfilesstatus, physical_file_status_callback
 from commands.evening_dashboard import (
     eveningdashboard, printablecauselist, evening_dashboard_job,
     filesready, evening_file_checkin_callback, evening_file_selection_callback,
@@ -3963,6 +3964,10 @@ app.add_handler(CommandHandler("nextdateslist", nextdateslist))
 app.add_handler(CommandHandler("eveningdashboard", eveningdashboard))
 app.add_handler(CommandHandler("printablecauselist", printablecauselist))
 app.add_handler(CommandHandler("filesready", filesready))
+app.add_handler(CommandHandler("mydashboard", mydashboard))
+app.add_handler(CommandHandler("officestatus", officestatus))
+app.add_handler(CommandHandler("myfilesstatus", myfilesstatus))
+app.add_handler(CallbackQueryHandler(physical_file_status_callback, pattern=r"^pfs:"))
 app.add_handler(CallbackQueryHandler(evening_file_checkin_callback, pattern=r"^efd:"))
 app.add_handler(CallbackQueryHandler(evening_file_selection_callback, pattern=r"^efs:"))
 
