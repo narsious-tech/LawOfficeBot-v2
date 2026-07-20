@@ -196,8 +196,15 @@ async def completion_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop("hearing_completion", None)
         warnings = result.get("warnings") or []
         lines = ["✅ HEARING COMPLETION SAVED", "", f"🔢 {result.get('case_number') or '-'}", f"📊 Status: {STATUS_LABELS.get(result.get('status'), result.get('status'))}", f"📅 Next date: {result.get('next_date') or '-'}"]
-        if result.get("task_id"):
-            lines.append(f"📋 Follow-up task: #{result['task_id']}")
+        lines += [
+            "",
+            "🔗 LOCAL SYNCHRONIZATION",
+            f"✅ Master case updated: #{result.get('case_record_id')}",
+            f"✅ Timeline updated: #{result.get('timeline_id')}",
+            (f"✅ Work created: #{result.get('work_id')}" if result.get('work_id') else "ℹ️ No preparation work required"),
+            (f"✅ Follow-up task created: #{result.get('task_id')}" if result.get('task_id') else "ℹ️ Follow-up task not requested"),
+            f"✅ Audit log written: #{result.get('audit_id')}",
+        ]
         if result.get("notify_client"):
             lines.append("📲 Client update flagged")
         ad_status = result.get("ad_sync_status")
