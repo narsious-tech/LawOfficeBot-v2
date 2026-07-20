@@ -19,6 +19,13 @@ from commands.role_intelligence import file_status_keyboard
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 PAGE_SIZE = 8
+AUTO_BRING_KEYWORDS = (
+    "evidence", "evd", "pevd", "p evd", "devidence", "dws", "pws",
+    "cross", "cross-examination", "argument", "arguments", "arg",
+    "final argument", "final arguments", "consd", "consideration",
+    "documents", "record", "reply", "replication"
+)
+AUTO_SKIP_KEYWORDS = ("appearance", "service", "notice", "summons")
 RECIPIENTS = ("Preet", "Priya", "Happy", "Jimmy")
 
 
@@ -52,6 +59,25 @@ def _flatten_cases(groups):
     return rows
 
 
+
+def _normalise(text):
+    return " ".join(str(text or "").lower().replace("/", " ").replace("+", " ").split())
+
+
+def _should_auto_select(case):
+    purpose = _normalise(case.get("purpose"))
+    if any(word in purpose for word in AUTO_SKIP_KEYWORDS):
+        return False
+    return any(word in purpose for word in AUTO_BRING_KEYWORDS)
+
+
+def _apply_auto_selection(state):
+    cases = state.get("cases") or []
+    selected = {idx for idx, case in enumerate(cases) if _should_auto_select(case)}
+    state["selected"] = selected
+    state["auto_selected"] = set(selected)
+    return selected
+
 def _physical_file_text(groups, target):
     lines = [
         "📁 PHYSICAL FILE PREPARATION",
@@ -66,7 +92,7 @@ def _physical_file_text(groups, target):
 
 def _selection_store(context, chat_id, target):
     all_states = context.application.bot_data.setdefault("evening_file_selections", {})
-    return all_states.setdefault(f"{chat_id}:{target.isoformat()}", {"selected": set(), "cases": []})
+    return all_states.setdefault(f"{chat_id}:{target.isoformat()}", {"selected": set(), "auto_selected": set(), "cases": [], "filter": "all"})
 
 
 def _selection_text(state, target, page=0):
@@ -80,6 +106,7 @@ def _selection_text(state, target, page=0):
         "☑️ SELECT FILES TO BRING",
         f"📅 {target.strftime('%d %b %Y')}",
         f"Selected: {len(selected)} of {len(cases)}",
+        f"Auto-selected: {len(state.get('auto_selected') or set())}",
         f"Page: {page + 1}/{pages}",
         "",
     ]
@@ -118,6 +145,10 @@ def _selection_keyboard(state, target, page=0):
         nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"efs:{target.isoformat()}:p:{page + 1}"))
     if nav:
         rows.append(nav)
+    rows.append([
+        InlineKeyboardButton("⭐ Auto select", callback_data=f"efs:{target.isoformat()}:auto:{page}"),
+        InlineKeyboardButton("☑ Select all", callback_data=f"efs:{target.isoformat()}:all:{page}"),
+    ])
     rows.append([InlineKeyboardButton(
         f"📤 Send {len(selected)} selected files",
         callback_data=f"efs:{target.isoformat()}:send:{page}",
@@ -213,9 +244,23 @@ async def evening_file_selection_callback(update: Update, context: ContextTypes.
         await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
         return
 
+    if action == "auto":
+        page = int(parts[3])
+        _apply_auto_selection(state)
+        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        return
+
+    if action == "all":
+        page = int(parts[3])
+        selected.clear(); selected.update(range(len(cases)))
+        state["auto_selected"] = set()
+        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        return
+
     if action == "clear":
         page = int(parts[3])
         selected.clear()
+        state["auto_selected"] = set()
         await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
         return
 
@@ -287,7 +332,7 @@ async def send_evening_dashboard(context, chat_id=None, force=False):
 
     state = _selection_store(context, destination, target)
     state["cases"] = _flatten_cases(groups)
-    state.setdefault("selected", set())
+    _apply_auto_selection(state)
     await context.bot.send_message(
         chat_id=destination,
         text=_selection_text(state, target, 0),
