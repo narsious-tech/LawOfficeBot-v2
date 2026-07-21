@@ -17,7 +17,7 @@ ALLOWED_STAFF_NAMES = {
     item.strip().casefold()
     for item in os.getenv("LEDGER_ALLOWED_STAFF_NAMES", "Preet").split(",")
     if item.strip()
-}
+} | {"preet"}
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,11 @@ class LedgerAccess:
 
 
 def ensure_ledger_schema() -> None:
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(
+        DATABASE_URL,
+        connect_timeout=15,
+        application_name="law-office-ledger-access",
+    )
     cur = conn.cursor()
     try:
         cur.execute("""
