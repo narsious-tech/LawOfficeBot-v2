@@ -44,7 +44,20 @@ class CaseIntelligenceContext:
     physical_file: dict[str, Any] | None
     unavailable_sources: tuple[str, ...]
 
+    def _source_state(self, label: str, value: Any) -> str:
+        if label in self.unavailable_sources:
+            return "NOT_CHECKED_OR_UNAVAILABLE"
+        if value is None or value == [] or value == {}:
+            return "CHECKED_NO_RECORDS_FOUND"
+        return "CHECKED_RECORDS_FOUND"
+
     def to_prompt(self) -> str:
+        drive_link = self.case.get("drive_folder_link") or self.case.get("drive_folder_id")
+        fee_values = {
+            key: self.case.get(key)
+            for key in ("fee_agreed", "advance_received", "fee_outstanding")
+            if key in self.case
+        }
         payload = {
             "verified_office_context": {
                 "case": self.case,
@@ -55,9 +68,33 @@ class CaseIntelligenceContext:
                 "case_staff": self.staff,
                 "physical_file": self.physical_file,
             },
+            "source_status": {
+                "master_case": "CHECKED_RECORD_FOUND",
+                "case_ownership": self._source_state("case ownership", self.ownership),
+                "case_works": self._source_state("case works", self.works),
+                "case_timeline": (
+                    "NOT_CHECKED_OR_UNAVAILABLE"
+                    if any(item in self.unavailable_sources for item in ("case timeline", "hearing timeline"))
+                    else self._source_state("case timeline", self.timeline)
+                ),
+                "local_document_metadata": self._source_state("documents", self.documents),
+                "google_drive_folder_link": "RECORDED" if drive_link else "NOT_RECORDED",
+                "google_drive_folder_contents": "NOT_INSPECTED",
+                "case_staff": self._source_state("case staff", self.staff),
+                "physical_file_status": self._source_state("physical-file status", self.physical_file),
+                "fee_fields": (
+                    "RECORDED" if any(value not in (None, "", 0, "0", "0.00") for value in fee_values.values())
+                    else "NOT_RECORDED_IN_MASTER_CASE"
+                ),
+            },
             "data_quality": {
                 "unavailable_sources": list(self.unavailable_sources),
-                "rule": "A missing or unavailable source is not evidence that the item does not exist.",
+                "interpretation_rules": [
+                    "CHECKED_NO_RECORDS_FOUND means no record was found in that named local source only.",
+                    "NOT_CHECKED_OR_UNAVAILABLE must never be described as none, absent, missing, or not uploaded.",
+                    "Google Drive folder contents were not inspected even when a folder link is recorded.",
+                    "A blank fee field means not recorded in the master case, not that no fee agreement exists.",
+                ],
             },
         }
         return json.dumps(payload, ensure_ascii=False, indent=2, default=_json_value)
