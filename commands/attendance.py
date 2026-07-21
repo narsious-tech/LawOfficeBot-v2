@@ -334,8 +334,29 @@ async def delinkstaff(
         telegram_user_id, staff_name, ad_email = matches[0]
 
         cur.execute("""
-            UPDATE staff_accounts
-            SET is_active = FALSE
+            CREATE TABLE IF NOT EXISTS staff_account_delink_history (
+                id SERIAL PRIMARY KEY,
+                telegram_user_id BIGINT NOT NULL,
+                staff_name TEXT,
+                ad_email TEXT,
+                delinked_by BIGINT,
+                delinked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cur.execute("""
+            INSERT INTO staff_account_delink_history
+                (telegram_user_id, staff_name, ad_email, delinked_by)
+            VALUES (%s, %s, %s, %s)
+        """, (
+            telegram_user_id,
+            staff_name,
+            ad_email,
+            update.effective_user.id if update.effective_user else None,
+        ))
+
+        cur.execute("""
+            DELETE FROM staff_accounts
             WHERE telegram_user_id = %s
               AND COALESCE(is_active, TRUE) = TRUE
         """, (telegram_user_id,))
@@ -343,7 +364,7 @@ async def delinkstaff(
         if cur.rowcount != 1:
             conn.rollback()
             await update.effective_message.reply_text(
-                "❌ Staff account was not de-linked because its active record changed.\n"
+                "❌ Staff link was not removed because its active record changed.\n"
                 "Run /linkedstaff and try again with the displayed Telegram ID."
             )
             return
@@ -369,7 +390,7 @@ async def delinkstaff(
         f"Staff: {staff_name}\n"
         f"Email: {ad_email or '-'}\n"
         f"Former Telegram ID: {telegram_user_id}\n\n"
-        "The Telegram link is now inactive. Historical credentials were retained.\nThe staff member can be linked again later using /linkstaff."
+        "Only this Telegram-to-staff link was removed. No other staff account was changed.\nA non-secret audit record was retained. The account can be linked again using /linkstaff."
     )
 
 def save_attendance_location(
