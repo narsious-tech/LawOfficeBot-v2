@@ -13,6 +13,8 @@ from commands.attendance import (
     checkout,
     approve_attendance,
     linkstaff,
+    linkedstaff,
+    delinkstaff,
     teststafflogin,
     monitor_attendance_job
 )
@@ -3636,6 +3638,8 @@ app.add_handler(
     CommandHandler("approveattendance", approve_attendance)
 )
 app.add_handler(CommandHandler("linkstaff", linkstaff))
+app.add_handler(CommandHandler("linkedstaff", linkedstaff))
+app.add_handler(CommandHandler("delinkstaff", delinkstaff))
 app.add_handler(CommandHandler("checkin", checkin))
 app.add_handler(CommandHandler("checkout", checkout))
 app.add_handler(CommandHandler("testweb", test_web))
