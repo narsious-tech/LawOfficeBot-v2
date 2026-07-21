@@ -1,7 +1,9 @@
 """Private structured ledger, daily closing summary and cash-box UI."""
 from __future__ import annotations
 
+import asyncio
 import html
+import logging
 from datetime import date
 from decimal import Decimal
 
@@ -12,6 +14,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Con
 from services.ledger_service import add_entry, cash_box_balance, check_access, ensure_ledger_schema, ledger_summary, parse_amount, soft_delete_entry
 
 WAIT_AMOUNT, WAIT_NOTE, WAIT_REFERENCE = range(3)
+logger = logging.getLogger(__name__)
 
 CATEGORY_MAP = {
     ("INCOME", "PROFESSIONAL"): ["Case Fee", "Consultation", "Drafting Fee", "Appearance Fee", "Reimbursement", "Other Professional Income"],
@@ -39,9 +42,20 @@ async def _authorize(update: Update):
     if update.effective_chat and update.effective_chat.type != ChatType.PRIVATE:
         await update.effective_message.reply_text("🔒 The financial ledger is available only in a private chat with the bot.")
         return None
-    access = check_access(update.effective_user.id)
+    try:
+        access = await asyncio.to_thread(check_access, update.effective_user.id)
+    except Exception as exc:
+        logger.exception("Ledger access check failed for Telegram user %s", update.effective_user.id)
+        await update.effective_message.reply_text(
+            f"⚠️ Ledger access could not be checked ({type(exc).__name__}). Please try again or ask Ajay to review the Railway log."
+        )
+        return None
     if not access.allowed:
-        await update.effective_message.reply_text("⛔ Access denied. Only Ajay and Preet may view or update this ledger.")
+        await update.effective_message.reply_text(
+            "⛔ Ledger access denied.\n\n"
+            f"Reason: {access.reason or 'This account is not authorised.'}\n"
+            f"Telegram User ID: {update.effective_user.id}"
+        )
         return None
     return access
 
@@ -146,8 +160,19 @@ def render_closing() -> str:
 async def ledger(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _authorize(update):
         return
-    ensure_ledger_schema()
-    await update.effective_message.reply_text(render_summary("DAILY LEDGER · TODAY", ledger_summary(date.today(), date.today())), parse_mode=ParseMode.HTML, reply_markup=ledger_keyboard())
+    try:
+        await asyncio.to_thread(ensure_ledger_schema)
+        summary = await asyncio.to_thread(ledger_summary, date.today(), date.today())
+        await update.effective_message.reply_text(
+            render_summary("DAILY LEDGER · TODAY", summary),
+            parse_mode=ParseMode.HTML,
+            reply_markup=ledger_keyboard(),
+        )
+    except Exception as exc:
+        logger.exception("Ledger failed for Telegram user %s", update.effective_user.id)
+        await update.effective_message.reply_text(
+            f"⚠️ Ledger could not be opened ({type(exc).__name__}). The error has been logged for review."
+        )
 
 
 async def ledger_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -325,10 +350,10 @@ def build_ledger_conversation_handler() -> ConversationHandler:
 
 def register_ledger_handlers(app) -> None:
     ensure_ledger_schema()
-    app.add_handler(CommandHandler("ledger", ledger), group=-2)
-    app.add_handler(CommandHandler("dailyledger", ledger), group=-2)
-    app.add_handler(CommandHandler("cashbox", cashbox), group=-2)
-    app.add_handler(CommandHandler("dailyclosing", dailyclosing), group=-2)
-    app.add_handler(CommandHandler("deleteledger", deleteledger), group=-2)
-    app.add_handler(CallbackQueryHandler(ledger_callback, pattern=r"^ledger:(add|scope|view|cancel):"), group=-2)
-    app.add_handler(build_ledger_conversation_handler(), group=-2)
+    app.add_handler(CommandHandler("ledger", ledger), group=-10)
+    app.add_handler(CommandHandler("dailyledger", ledger), group=-10)
+    app.add_handler(CommandHandler("cashbox", cashbox), group=-10)
+    app.add_handler(CommandHandler("dailyclosing", dailyclosing), group=-10)
+    app.add_handler(CommandHandler("deleteledger", deleteledger), group=-10)
+    app.add_handler(CallbackQueryHandler(ledger_callback, pattern=r"^ledger:(add|scope|view|cancel):"), group=-10)
+    app.add_handler(build_ledger_conversation_handler(), group=-10)
