@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -8,7 +9,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Con
 
 from ai.config import AIConfig
 from ai.gateway import AIGateway, AIUnavailable
-from ai.knowledge_service import OfficeKnowledgeService
+from ai.knowledge_service import CaseMatch, OfficeKnowledgeService
 from ai.permissions import is_ai_authorized
 from ai.schema import ensure_ai_schema
 from ai.session_store import AISessionStore
@@ -29,6 +30,17 @@ def _menu() -> InlineKeyboardMarkup:
     ])
 
 
+def _case_buttons(cases: list[CaseMatch]) -> InlineKeyboardMarkup:
+    rows = []
+    for case in cases:
+        label = case.case_number
+        if len(label) > 48:
+            label = label[:45] + "…"
+        rows.append([InlineKeyboardButton(f"⚖️ {label}", callback_data=f"ajayai:casepick:{case.db_id}")])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="ajayai:close")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def _authorized(update: Update) -> bool:
     user_id = update.effective_user.id if update.effective_user else None
     if not is_ai_authorized(user_id):
@@ -46,7 +58,7 @@ async def ai_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧠 AJAY AI\n\n"
         f"Status: {status}\n"
         "Private legal intelligence workspace.\n\n"
-        "The first working capability is Ask Ajay AI. Case Intelligence can use a bounded local case snapshot.",
+        "Case Intelligence now prepares a grounded brief from one selected office case.",
         reply_markup=_menu(),
     )
     return ConversationHandler.END
@@ -60,25 +72,91 @@ async def ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     data = query.data or ""
     if data == "ajayai:close":
+        context.user_data.pop("ajay_ai_mode", None)
         await query.edit_message_text("Ajay AI workspace closed. Use /ai to reopen it.")
         return ConversationHandler.END
     if data.startswith("ajayai:coming:"):
         feature = data.rsplit(":", 1)[-1].replace("_", " ").title()
         await query.message.reply_text(f"🧠 {feature} is reserved for the next intelligence release.")
         return ConversationHandler.END
-    mode = "case" if data == "ajayai:case" else "general"
-    context.user_data["ajay_ai_mode"] = mode
-    prompt = (
-        "Send the case number, client name, or party name. Ajay AI will load a limited local case snapshot and prepare a structured working note."
-        if mode == "case" else
-        "Send your legal or office-work question. Do not include passwords, API keys, or unnecessary sensitive personal data."
+    if data == "ajayai:case":
+        context.user_data["ajay_ai_mode"] = "case_search"
+        try:
+            cases = await asyncio.to_thread(OfficeKnowledgeService().search_cases, "", 6)
+        except Exception:
+            logger.exception("Could not load recent cases for Ajay AI")
+            cases = []
+        text = "📄 CASE INTELLIGENCE\n\nSelect one recent case below, or send a case number, client name, or party name."
+        await query.message.reply_text(text, reply_markup=_case_buttons(cases) if cases else None)
+        return AI_WAITING_QUESTION
+    context.user_data["ajay_ai_mode"] = "general"
+    await query.message.reply_text(
+        "Send your legal or office-work question. Do not include passwords, API keys, or unnecessary sensitive personal data.\n\nUse /cancelai to stop."
     )
-    await query.message.reply_text(prompt + "\n\nUse /cancelai to stop.")
     return AI_WAITING_QUESTION
 
 
 def _split(text: str, size: int = 3800) -> list[str]:
     return [text[i:i + size] for i in range(0, len(text), size)] or [""]
+
+
+async def _generate_case_brief(update: Update, context: ContextTypes.DEFAULT_TYPE, case_db_id: int):
+    message = update.effective_message
+    user_id = update.effective_user.id
+    await message.reply_text("🧠 Loading verified office context and preparing the case brief…")
+    try:
+        await asyncio.to_thread(ensure_ai_schema)
+        knowledge = OfficeKnowledgeService()
+        case_context = await asyncio.to_thread(knowledge.build_case_context, case_db_id)
+        if not case_context:
+            await message.reply_text("The selected case could not be found. Please search again from /ai.")
+            return ConversationHandler.END
+        case_number = str(case_context.case.get("case_number") or case_context.case.get("case_id") or case_db_id)
+        store = AISessionStore()
+        session_id = await asyncio.to_thread(store.create_session, user_id, "case_intelligence", case_number)
+        request = "Prepare the grounded case-intelligence brief for the selected case."
+        await asyncio.to_thread(store.add_message, session_id, "user", request)
+        result = await asyncio.to_thread(
+            AIGateway(store=store).generate,
+            user_id=user_id,
+            session_id=session_id,
+            user_text=request,
+            feature="case_intelligence",
+            office_context=case_context.to_prompt(),
+        )
+        await asyncio.to_thread(store.add_message, session_id, "assistant", result.text)
+        for chunk in _split(result.text):
+            await message.reply_text(chunk)
+        unavailable = list(case_context.unavailable_sources)
+        if unavailable:
+            safe = ", ".join(html.escape(item) for item in unavailable)
+            await message.reply_text(f"ℹ️ Data not available to this brief: {safe}.")
+        await message.reply_text(
+            "⚠️ AI working note: verify facts, documents, orders, and law before relying on it.",
+            reply_markup=_menu(),
+        )
+    except AIUnavailable as exc:
+        await message.reply_text(f"⚠️ Ajay AI unavailable\n\n{exc}")
+    except Exception as exc:
+        logger.exception("Ajay AI case-intelligence request failed")
+        await message.reply_text(f"❌ Case Intelligence failed safely: {type(exc).__name__}")
+    finally:
+        context.user_data.pop("ajay_ai_mode", None)
+    return ConversationHandler.END
+
+
+async def ai_case_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_ai_authorized(query.from_user.id):
+        await query.message.reply_text("🔒 Access denied.")
+        return ConversationHandler.END
+    try:
+        case_db_id = int((query.data or "").rsplit(":", 1)[-1])
+    except ValueError:
+        await query.message.reply_text("Invalid case selection. Please reopen /ai.")
+        return ConversationHandler.END
+    return await _generate_case_brief(update, context, case_db_id)
 
 
 async def ai_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -88,31 +166,43 @@ async def ai_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.effective_message.reply_text("Please send a text request.")
         return AI_WAITING_QUESTION
+    mode = context.user_data.get("ajay_ai_mode", "general")
+    if mode == "case_search":
+        try:
+            cases = await asyncio.to_thread(OfficeKnowledgeService().search_cases, text, 10)
+        except Exception as exc:
+            logger.exception("Ajay AI case search failed")
+            await update.effective_message.reply_text(f"❌ Case search failed safely: {type(exc).__name__}")
+            return AI_WAITING_QUESTION
+        if not cases:
+            await update.effective_message.reply_text("No matching case was found. Try another case number, client, or party name.")
+            return AI_WAITING_QUESTION
+        await update.effective_message.reply_text(
+            f"Select one case for the AI brief ({len(cases)} match{'es' if len(cases) != 1 else ''}):",
+            reply_markup=_case_buttons(cases),
+        )
+        return AI_WAITING_QUESTION
+
     await update.effective_message.reply_text("🧠 Preparing a reviewable AI working note…")
     user_id = update.effective_user.id
-    mode = context.user_data.get("ajay_ai_mode", "general")
     try:
         await asyncio.to_thread(ensure_ai_schema)
         store = AISessionStore()
-        session_id = await asyncio.to_thread(store.create_session, user_id, mode, text if mode == "case" else None)
-        office_context = None
-        ai_request = text
-        if mode == "case":
-            office_context = await asyncio.to_thread(OfficeKnowledgeService().case_snapshot, text)
-            ai_request = "Prepare a preliminary case-intelligence brief from the verified office context."
+        session_id = await asyncio.to_thread(store.create_session, user_id, "general", None)
         await asyncio.to_thread(store.add_message, session_id, "user", text)
         result = await asyncio.to_thread(
             AIGateway(store=store).generate,
             user_id=user_id,
             session_id=session_id,
-            user_text=ai_request,
+            user_text=text,
             feature="general",
-            office_context=office_context,
         )
         await asyncio.to_thread(store.add_message, session_id, "assistant", result.text)
         for chunk in _split(result.text):
             await update.effective_message.reply_text(chunk)
-        await update.effective_message.reply_text("⚠️ Review and verify before relying on this working note.", reply_markup=_menu())
+        await update.effective_message.reply_text(
+            "⚠️ Review and verify before relying on this working note.", reply_markup=_menu()
+        )
     except AIUnavailable as exc:
         await update.effective_message.reply_text(f"⚠️ Ajay AI unavailable\n\n{exc}")
     except Exception as exc:
@@ -133,10 +223,14 @@ def build_ai_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
             CommandHandler("ai", ai_home),
-            CallbackQueryHandler(ai_callback, pattern=r"^ajayai:"),
+            CallbackQueryHandler(ai_callback, pattern=r"^ajayai:(?!casepick:).+"),
         ],
         states={
-            AI_WAITING_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, ai_question)],
+            AI_WAITING_QUESTION: [
+                CallbackQueryHandler(ai_case_pick, pattern=r"^ajayai:casepick:\d+$"),
+                CallbackQueryHandler(ai_callback, pattern=r"^ajayai:close$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ai_question),
+            ],
         },
         fallbacks=[CommandHandler("cancelai", cancel_ai)],
         allow_reentry=True,
