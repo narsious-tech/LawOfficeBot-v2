@@ -78,10 +78,21 @@ class OfficeKnowledgeService:
         )
 
     @staticmethod
+    def _first_value(row: Any) -> Any:
+        if row is None:
+            return None
+        if isinstance(row, dict):
+            return next(iter(row.values()), None)
+        try:
+            return row[0]
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    @staticmethod
     def _table_exists(cur, table: str) -> bool:
         cur.execute("SELECT to_regclass(%s)", (f"public.{table}",))
         row = cur.fetchone()
-        return bool(row and row[0])
+        return bool(OfficeKnowledgeService._first_value(row))
 
     @staticmethod
     def _columns(cur, table: str) -> set[str]:
@@ -90,7 +101,11 @@ class OfficeKnowledgeService:
                WHERE table_schema='public' AND table_name=%s""",
             (table,),
         )
-        return {str(row[0]) for row in cur.fetchall()}
+        return {
+            str(value)
+            for row in cur.fetchall()
+            if (value := OfficeKnowledgeService._first_value(row)) is not None
+        }
 
     @staticmethod
     def _pick(columns: set[str], *names: str, default: str = "NULL") -> str:
