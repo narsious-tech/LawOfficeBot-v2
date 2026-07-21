@@ -1,5 +1,11 @@
 # AILIP Changelog
 
+## v1.1.1 — Case Search Compatibility Fix
+
+- Fixed `KeyError` during Case Intelligence searches when PostgreSQL metadata
+  rows are returned through `RealDictCursor`.
+- Preserved tuple-cursor compatibility for older deployments.
+
 ## v1.1.0 — Sprint 21 AI Case Intelligence
 
 - Added exact-case selection and search inside the private `/ai` workspace.
