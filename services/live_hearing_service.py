@@ -128,7 +128,11 @@ def list_live_hearings(target_date: date | None = None):
     try:
         cur.execute("""
             SELECT * FROM live_hearings WHERE hearing_date=%s
-            ORDER BY COALESCE(NULLIF(floor,''),'999'), COALESCE(NULLIF(room,''),'999'), judge_name, id
+            ORDER BY
+                CASE WHEN COALESCE(floor, '') ~ '^[0-9]+$' THEN floor::INTEGER ELSE 999 END,
+                CASE WHEN COALESCE(room, '') ~ '^[0-9]+$' THEN room::INTEGER ELSE 999 END,
+                LOWER(COALESCE(judge_name, '')),
+                id
         """, (target_date,))
         return [dict(r) for r in cur.fetchall()]
     finally:
