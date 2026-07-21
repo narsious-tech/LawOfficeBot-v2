@@ -39,6 +39,31 @@ def _usable_groups(groups):
     )
 
 
+def _groups_from_live_rows(rows):
+    """Rebuild cause-list groups from today's persistent live mirror."""
+    grouped = {}
+    for row in rows or []:
+        key = (
+            normalize_space(row.get("court_name")),
+            normalize_space(row.get("judge_name")),
+            normalize_space(row.get("floor")),
+            normalize_space(row.get("room")),
+        )
+        group = grouped.setdefault(key, {
+            "court_name": key[0],
+            "judge_name": key[1],
+            "floor": key[2],
+            "room": key[3],
+            "cases": [],
+        })
+        group["cases"].append({
+            "case_number": row.get("case_number"),
+            "case_title": row.get("case_title"),
+            "stage": row.get("stage"),
+            "previous_date": None,
+        })
+    return _usable_groups(grouped.values())
+
 def _stage_bucket(stage):
     text = normalize_space(stage).lower()
     if any(word in text for word in ("bail", "appearance", "presence")):
@@ -167,6 +192,12 @@ async def publish_morning_operations(context, force=False):
         live_rows = await asyncio.to_thread(list_live_hearings, now.date())
     except Exception as exc:
         print(f"MORNING LIVE BOARD INITIALIZATION FAILED: {type(exc).__name__}: {exc}")
+
+    if not groups and live_rows:
+        groups = _groups_from_live_rows(live_rows)
+        total = sum(len(group["cases"]) for group in groups)
+        source = f"Live Hearing Mirror ({live_source})"
+        live_count = len(live_rows)
 
     await context.bot.send_message(
         chat_id=int(group_id),

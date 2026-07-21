@@ -194,6 +194,7 @@ async def linkedstaff(
                 is_active
             FROM staff_accounts
             WHERE telegram_user_id IS NOT NULL
+              AND COALESCE(is_active, TRUE) = TRUE
             ORDER BY
                 is_active DESC,
                 LOWER(staff_name)
@@ -285,6 +286,7 @@ async def delinkstaff(
                     ad_email
                 FROM staff_accounts
                 WHERE telegram_user_id = %s
+                  AND COALESCE(is_active, TRUE) = TRUE
             """, (int(target),))
 
         elif "@" in target:
@@ -296,6 +298,7 @@ async def delinkstaff(
                 FROM staff_accounts
                 WHERE LOWER(ad_email) = LOWER(%s)
                   AND telegram_user_id IS NOT NULL
+                  AND COALESCE(is_active, TRUE) = TRUE
             """, (target,))
 
         else:
@@ -307,6 +310,7 @@ async def delinkstaff(
                 FROM staff_accounts
                 WHERE LOWER(staff_name) = LOWER(%s)
                   AND telegram_user_id IS NOT NULL
+                  AND COALESCE(is_active, TRUE) = TRUE
             """, (target,))
 
         matches = cur.fetchall()
@@ -331,17 +335,30 @@ async def delinkstaff(
 
         cur.execute("""
             UPDATE staff_accounts
-            SET
-                telegram_user_id = NULL,
-                is_active = FALSE
+            SET is_active = FALSE
             WHERE telegram_user_id = %s
+              AND COALESCE(is_active, TRUE) = TRUE
         """, (telegram_user_id,))
+
+        if cur.rowcount != 1:
+            conn.rollback()
+            await update.effective_message.reply_text(
+                "❌ Staff account was not de-linked because its active record changed.\n"
+                "Run /linkedstaff and try again with the displayed Telegram ID."
+            )
+            return
 
         conn.commit()
 
-    except Exception:
+    except Exception as exc:
         conn.rollback()
-        raise
+        print(f"STAFF DE-LINK FAILED: {type(exc).__name__}: {exc}")
+        await update.effective_message.reply_text(
+            "❌ Staff de-link failed safely. No account was changed.\n\n"
+            f"Reason: {type(exc).__name__}\n"
+            "Please check the Railway logs or ask the administrator to retry."
+        )
+        return
 
     finally:
         cur.close()
@@ -352,7 +369,7 @@ async def delinkstaff(
         f"Staff: {staff_name}\n"
         f"Email: {ad_email or '-'}\n"
         f"Former Telegram ID: {telegram_user_id}\n\n"
-        "The staff member can be linked again later using /linkstaff."
+        "The Telegram link is now inactive. Historical credentials were retained.\nThe staff member can be linked again later using /linkstaff."
     )
 
 def save_attendance_location(
