@@ -51,13 +51,16 @@ class AIGateway:
         conversation.append(f"USER: {user_text}")
         input_text = "\n\n".join(conversation)
         try:
-            response = client.responses.create(
-                model=self.config.model,
-                instructions=build_instructions(feature),
-                input=input_text,
-                max_output_tokens=self.config.max_output_tokens,
-                temperature=self.config.temperature,
-            )
+            request_args = {
+                "model": self.config.model,
+                "instructions": build_instructions(feature),
+                "input": input_text,
+                "max_output_tokens": self.config.max_output_tokens,
+            }
+            model_name = self.config.model.lower()
+            if not model_name.startswith(("gpt-5", "o1", "o3", "o4")):
+                request_args["temperature"] = self.config.temperature
+            response = client.responses.create(**request_args)
             text = (response.output_text or "").strip()
             if not text:
                 raise AIUnavailable("OpenAI returned an empty response.")
