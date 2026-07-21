@@ -1,16 +1,22 @@
 import os
 import re
+import base64
+import json
 from typing import Optional, Tuple
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
+GOOGLE_DRIVE_AUTH_MODE = os.getenv("GOOGLE_DRIVE_AUTH_MODE", "auto").strip().lower()
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64")
 
 
 def extract_folder_id(value: str) -> str:
@@ -46,6 +52,71 @@ DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 _drive_service = None
 _drive_error: Optional[str] = None
+_drive_auth_mode: Optional[str] = None
+
+
+def _service_account_info() -> Optional[dict]:
+    """Load service-account credentials from a Railway secret without a file."""
+    raw = GOOGLE_SERVICE_ACCOUNT_JSON
+    if not raw and GOOGLE_SERVICE_ACCOUNT_JSON_BASE64:
+        try:
+            raw = base64.b64decode(GOOGLE_SERVICE_ACCOUNT_JSON_BASE64).decode("utf-8")
+        except Exception as exc:
+            raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 is invalid") from exc
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON") from exc
+    if value.get("type") != "service_account" or not value.get("client_email"):
+        raise ValueError("Google credential is not a valid service-account key")
+    return value
+
+
+def _build_credentials():
+    """Choose durable service-account auth first, with user OAuth as fallback."""
+    mode = GOOGLE_DRIVE_AUTH_MODE
+    if mode not in {"auto", "service_account", "oauth"}:
+        raise ValueError("GOOGLE_DRIVE_AUTH_MODE must be auto, service_account, or oauth")
+
+    info = _service_account_info() if mode in {"auto", "service_account"} else None
+    if info:
+        return (
+            service_account.Credentials.from_service_account_info(
+                info,
+                scopes=[DRIVE_SCOPE],
+            ),
+            "service_account",
+        )
+    if mode == "service_account":
+        raise ValueError(
+            "Service-account mode requires GOOGLE_SERVICE_ACCOUNT_JSON or "
+            "GOOGLE_SERVICE_ACCOUNT_JSON_BASE64"
+        )
+
+    missing = [
+        name
+        for name, value in (
+            ("GOOGLE_CLIENT_ID", GOOGLE_CLIENT_ID),
+            ("GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET),
+            ("GOOGLE_REFRESH_TOKEN", GOOGLE_REFRESH_TOKEN),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError("Missing Google OAuth variable(s): " + ", ".join(missing))
+    return (
+        Credentials(
+            token=None,
+            refresh_token=GOOGLE_REFRESH_TOKEN,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            scopes=[DRIVE_SCOPE],
+        ),
+        "oauth",
+    )
 
 
 def build_drive_service(
@@ -57,7 +128,7 @@ def build_drive_service(
     Returns:
         Google Drive service object, or None when authentication is unavailable.
     """
-    global _drive_service, _drive_error
+    global _drive_service, _drive_error, _drive_auth_mode
 
     if (
         _drive_service is not None
@@ -67,49 +138,10 @@ def build_drive_service(
 
     _drive_service = None
     _drive_error = None
-
-    missing = []
-
-    if not GOOGLE_CLIENT_ID:
-        missing.append(
-            "GOOGLE_CLIENT_ID"
-        )
-
-    if not GOOGLE_CLIENT_SECRET:
-        missing.append(
-            "GOOGLE_CLIENT_SECRET"
-        )
-
-    if not GOOGLE_REFRESH_TOKEN:
-        missing.append(
-            "GOOGLE_REFRESH_TOKEN"
-        )
-
-    if missing:
-        _drive_error = (
-            "Missing Google OAuth variable(s): "
-            + ", ".join(missing)
-        )
-
-        print(
-            "Google Drive disabled: "
-            f"{_drive_error}"
-        )
-
-        return None
-
-    credentials = Credentials(
-        token=None,
-        refresh_token=GOOGLE_REFRESH_TOKEN,
-        token_uri=(
-            "https://oauth2.googleapis.com/token"
-        ),
-        client_id=GOOGLE_CLIENT_ID,
-        client_secret=GOOGLE_CLIENT_SECRET,
-        scopes=[DRIVE_SCOPE]
-    )
+    _drive_auth_mode = None
 
     try:
+        credentials, selected_mode = _build_credentials()
         credentials.refresh(
             Request()
         )
@@ -121,16 +153,31 @@ def build_drive_service(
             cache_discovery=False
         )
 
+        # Authentication alone is insufficient: verify this identity can read
+        # the configured root folder before declaring Drive healthy.
+        _drive_service.files().get(
+            fileId=ROOT_FOLDER_ID,
+            fields="id,name,mimeType",
+            supportsAllDrives=True,
+        ).execute()
+
+        _drive_auth_mode = selected_mode
+
         print(
-            "Google Drive connected."
+            f"Google Drive connected ({selected_mode})."
         )
 
         return _drive_service
 
     except RefreshError as exc:
-        _drive_error = (
-            f"{type(exc).__name__}: {exc}"
-        )
+        text = str(exc)
+        if "invalid_grant" in text:
+            _drive_error = (
+                "OAUTH_REAUTH_REQUIRED: the Google refresh token was revoked, "
+                "expired, displaced, or blocked by an account policy"
+            )
+        else:
+            _drive_error = f"{type(exc).__name__}: {exc}"
 
         print(
             "Google Drive disabled: "
@@ -179,6 +226,19 @@ def drive_is_connected() -> bool:
 
 def get_drive_error() -> Optional[str]:
     return _drive_error
+
+
+def get_drive_auth_mode() -> Optional[str]:
+    return _drive_auth_mode
+
+
+def get_drive_status() -> dict:
+    return {
+        "connected": _drive_service is not None,
+        "auth_mode": _drive_auth_mode or GOOGLE_DRIVE_AUTH_MODE,
+        "root_folder_id": ROOT_FOLDER_ID,
+        "error": _drive_error,
+    }
 
 
 def ensure_root_folder_id():
