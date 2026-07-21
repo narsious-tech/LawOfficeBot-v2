@@ -1028,7 +1028,8 @@ async def send_daily_cause_list(context, force=False):
 
 
 async def daily_cause_list_job(context):
-    await send_daily_cause_list(context, force=False)
+    from commands.morning_operations import publish_morning_operations
+    await publish_morning_operations(context, force=False)
 
 async def pending_tasks_summary_job(context):
     from commands.works import pendingtasks, mytasks
@@ -1116,7 +1117,8 @@ async def test_cause_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        result = await send_daily_cause_list(context, force=True)
+        from commands.morning_operations import publish_morning_operations
+        result = await publish_morning_operations(context, force=True)
 
         await update.effective_message.reply_text(
             "✅ Test completed. Check the office group.\n"
