@@ -100,6 +100,31 @@ class CaseIntelligenceContext:
         return json.dumps(payload, ensure_ascii=False, indent=2, default=_json_value)
 
 
+@dataclass(frozen=True)
+class HearingDayContext:
+    target_date: date
+    cases: list[dict[str, Any]]
+    unavailable_sources: tuple[str, ...]
+
+    def to_prompt(self) -> str:
+        payload = {
+            "hearing_date": self.target_date.isoformat(),
+            "verified_office_context": {"hearings": self.cases},
+            "source_status": {
+                "master_cases": "CHECKED_RECORDS_FOUND" if self.cases else "CHECKED_NO_RECORDS_FOUND",
+                "google_drive_folder_contents": "NOT_INSPECTED",
+                "unavailable_sources": list(self.unavailable_sources),
+            },
+            "interpretation_rules": [
+                "Each hearing entry belongs to one distinct case; never combine cases.",
+                "Only listed fields and connected local records are verified office facts.",
+                "A Drive link does not mean the folder contents were inspected.",
+                "An unavailable source must not be described as empty or missing.",
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2, default=_json_value)
+
+
 class OfficeKnowledgeService:
     """Read-only, bounded office knowledge for Ajay AI.
 
@@ -188,6 +213,78 @@ class OfficeKnowledgeService:
                 ]
         finally:
             conn.close()
+
+    @staticmethod
+    def _as_date(value: Any) -> date | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        for candidate in (text[:10], text):
+            for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%y", "%d/%m/%y"):
+                try:
+                    return datetime.strptime(candidate, fmt).date()
+                except ValueError:
+                    continue
+        return None
+
+    def build_hearing_day_context(self, target_date: date, limit: int = 20) -> HearingDayContext:
+        """Build a bounded, read-only preparation context for one hearing date."""
+        conn = self._connect()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                columns = self._columns(cur, "cases")
+                date_columns = [name for name in ("next_hearing", "next_hearing_date", "hearing_date") if name in columns]
+                if not date_columns:
+                    return HearingDayContext(target_date, [], ("case hearing date",))
+                where = " OR ".join(f"{name} IS NOT NULL" for name in date_columns)
+                cur.execute(f"SELECT * FROM cases WHERE {where} ORDER BY id DESC LIMIT 2000")
+                rows = [dict(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+        matched: list[dict[str, Any]] = []
+        unavailable: set[str] = set()
+        for row in rows:
+            if not any(self._as_date(row.get(name)) == target_date for name in date_columns):
+                continue
+            context = self.build_case_context(int(row["id"]))
+            if not context:
+                continue
+            unavailable.update(context.unavailable_sources)
+            case = context.case
+            matched.append({
+                "case_record_id": case.get("id"),
+                "case_number": case.get("case_number") or case.get("case_id"),
+                "case_title": case.get("case_title") or case.get("title"),
+                "client_name": case.get("client_name"),
+                "opposite_party": case.get("opposite_party"),
+                "case_type": case.get("case_type"),
+                "court": case.get("court_name"),
+                "judge": case.get("judge_name"),
+                "hearing_date": target_date.isoformat(),
+                "purpose": case.get("next_purpose") or case.get("purpose"),
+                "status": case.get("status"),
+                "client_verification_status": case.get("client_verification_status"),
+                "drive_folder_link": case.get("drive_folder_link"),
+                "ownership": context.ownership,
+                "open_works": context.works[:8],
+                "recent_timeline": context.timeline[:5],
+                "document_metadata": context.documents[:10],
+                "case_staff": context.staff[:8],
+                "physical_file": context.physical_file,
+            })
+            if len(matched) >= max(1, min(limit, 30)):
+                break
+        matched.sort(key=lambda item: (
+            str(item.get("court") or ""), str(item.get("judge") or ""), str(item.get("case_number") or "")
+        ))
+        return HearingDayContext(target_date, matched, tuple(sorted(unavailable)))
 
     def build_case_context(self, case_db_id: int) -> CaseIntelligenceContext | None:
         conn = self._connect()
