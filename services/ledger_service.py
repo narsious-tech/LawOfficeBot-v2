@@ -83,11 +83,31 @@ def check_access(telegram_user_id: int) -> LedgerAccess:
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT staff_name
-            FROM staff_accounts
-            WHERE telegram_user_id = %s AND is_active = TRUE
-            ORDER BY id DESC LIMIT 1
-        """, (telegram_user_id,))
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'staff_accounts'
+        """)
+        columns = {str(item[0]).casefold() for item in cur.fetchall()}
+        if "staff_name" not in columns or "telegram_user_id" not in columns:
+            return LedgerAccess(False, "", "Staff account schema is incomplete.")
+
+        active_filter = (
+            " AND COALESCE(is_active, TRUE) = TRUE"
+            if "is_active" in columns
+            else ""
+        )
+        order_clause = (
+            " ORDER BY created_at DESC"
+            if "created_at" in columns
+            else ""
+        )
+        cur.execute(
+            "SELECT staff_name FROM staff_accounts "
+            "WHERE telegram_user_id = %s"
+            f"{active_filter}{order_clause} LIMIT 1",
+            (telegram_user_id,),
+        )
         row = cur.fetchone()
     finally:
         cur.close()
