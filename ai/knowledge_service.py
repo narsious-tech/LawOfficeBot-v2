@@ -233,6 +233,17 @@ class OfficeKnowledgeService:
                     continue
         return None
 
+    @staticmethod
+    def _public_case_reference(case: dict[str, Any]) -> str:
+        """Return a public case reference without exposing a numeric database key."""
+        for name in ("case_number", "case_id"):
+            value = str(case.get(name) or "").strip()
+            if not value or value.isdigit():
+                continue
+            if "/" in value or (any(char.isalpha() for char in value) and any(char.isdigit() for char in value)):
+                return value
+        return "Case number not recorded"
+
     def build_hearing_day_context(self, target_date: date, limit: int = 20) -> HearingDayContext:
         """Build a bounded, read-only preparation context for one hearing date."""
         conn = self._connect()
@@ -259,8 +270,7 @@ class OfficeKnowledgeService:
             unavailable.update(context.unavailable_sources)
             case = context.case
             matched.append({
-                "case_record_id": case.get("id"),
-                "case_number": case.get("case_number") or case.get("case_id"),
+                "case_number": self._public_case_reference(case),
                 "case_title": case.get("case_title") or case.get("title"),
                 "client_name": case.get("client_name"),
                 "opposite_party": case.get("opposite_party"),
@@ -278,6 +288,19 @@ class OfficeKnowledgeService:
                 "document_metadata": context.documents[:10],
                 "case_staff": context.staff[:8],
                 "physical_file": context.physical_file,
+                "record_status": {
+                    "ownership": context._source_state("case ownership", context.ownership),
+                    "open_works": context._source_state("case works", context.works),
+                    "timeline": (
+                        "NOT_CHECKED_OR_UNAVAILABLE"
+                        if any(item in context.unavailable_sources for item in ("case timeline", "hearing timeline"))
+                        else context._source_state("case timeline", context.timeline)
+                    ),
+                    "documents": context._source_state("documents", context.documents),
+                    "case_staff": context._source_state("case staff", context.staff),
+                    "physical_file": context._source_state("physical-file status", context.physical_file),
+                    "drive_folder_contents": "NOT_INSPECTED",
+                },
             })
             if len(matched) >= max(1, min(limit, 30)):
                 break
