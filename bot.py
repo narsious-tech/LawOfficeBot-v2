@@ -19,6 +19,12 @@ from commands.attendance import (
     teststafflogin,
     monitor_attendance_job
 )
+from commands.email_alerts import (
+    email_alert_callback,
+    email_alert_status,
+    email_monitor_job,
+    test_email_alerts,
+)
 from commands.attendance_reports import (
     whoinoffice,
     attendancetoday,
@@ -3736,6 +3742,9 @@ app.add_handler(
 app.add_handler(CommandHandler("debugcasejson", debugcasejson))
 app.add_handler(CommandHandler("syncreport", syncreport))
 app.add_handler(CommandHandler("attendanceapp", attendanceapp))
+app.add_handler(CommandHandler("emailalertstatus", email_alert_status))
+app.add_handler(CommandHandler("testemailalerts", test_email_alerts))
+app.add_handler(CallbackQueryHandler(email_alert_callback, pattern=r"^emack:"))
 app.add_handler(
     CommandHandler(
         "syncattendancetoday",
@@ -3996,6 +4005,12 @@ app.job_queue.run_repeating(
     monitor_attendance_job,
     interval=300,
     first=30
+)
+app.job_queue.run_repeating(
+    email_monitor_job,
+    interval=max(60, int(os.getenv("EMAIL_ALERT_POLL_SECONDS", "300"))),
+    first=45,
+    name="office_email_monitor"
 )
 
 
