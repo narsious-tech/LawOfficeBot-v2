@@ -21,6 +21,7 @@ import psycopg2
 from config import DATABASE_URL
 import os
 from datetime import datetime
+from utils.attendance_webapp import get_attendance_app_url
 from bs4 import BeautifulSoup
 
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
@@ -541,7 +542,7 @@ async def checkin(
 
     staff_name, ad_email, ad_password = staff
 
-    app_url = os.getenv("ATTENDANCE_APP_URL")
+    app_url = get_attendance_app_url()
 
     if not app_url:
         await update.effective_message.reply_text(
@@ -583,7 +584,7 @@ async def checkout(
 
     staff_name, ad_email, ad_password = staff
 
-    app_url = os.getenv("ATTENDANCE_APP_URL")
+    app_url = get_attendance_app_url()
 
     if not app_url:
         await update.effective_message.reply_text(
