@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from collections import Counter
 from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
@@ -51,6 +52,19 @@ def _hearing_buttons() -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton("❌ Cancel", callback_data="ajayai:close")],
     ])
+
+
+def _hearing_overview(target: date, cases: list[dict]) -> str:
+    courts = Counter(str(item.get("court") or "Court not recorded") for item in cases)
+    lines = [
+        f"⚖️ HEARING INTELLIGENCE • {target.strftime('%d-%m-%Y')}",
+        f"📌 Verified matters: {len(cases)}",
+        f"🏛 Court categories: {len(courts)}",
+        "",
+        "COURT-WISE LOAD",
+    ]
+    lines.extend(f"• {court}: {count}" for court, count in sorted(courts.items()))
+    return "\n".join(lines)
 
 
 async def _authorized(update: Update) -> bool:
@@ -221,10 +235,7 @@ async def ai_hearing_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
             office_context=hearing_context.to_prompt(),
         )
         await asyncio.to_thread(store.add_message, session_id, "assistant", result.text)
-        await query.message.reply_text(
-            f"⚖️ HEARING INTELLIGENCE • {target.strftime('%d-%m-%Y')}\n"
-            f"Verified master-case matches: {len(hearing_context.cases)}"
-        )
+        await query.message.reply_text(_hearing_overview(target, hearing_context.cases))
         for chunk in _split(result.text):
             await query.message.reply_text(chunk)
         if hearing_context.unavailable_sources:
