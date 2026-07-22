@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from datetime import date, timedelta
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
@@ -22,7 +24,7 @@ def _menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 Ask Ajay AI", callback_data="ajayai:ask")],
         [InlineKeyboardButton("📄 Case Intelligence", callback_data="ajayai:case")],
-        [InlineKeyboardButton("⚖️ Hearing Intelligence", callback_data="ajayai:coming:hearing")],
+        [InlineKeyboardButton("⚖️ Hearing Intelligence", callback_data="ajayai:hearing")],
         [InlineKeyboardButton("📚 Legal Research", callback_data="ajayai:coming:research")],
         [InlineKeyboardButton("📝 Drafting", callback_data="ajayai:coming:drafting")],
         [InlineKeyboardButton("📂 Documents", callback_data="ajayai:coming:documents")],
@@ -39,6 +41,16 @@ def _case_buttons(cases: list[CaseMatch]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(f"⚖️ {label}", callback_data=f"ajayai:casepick:{case.db_id}")])
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="ajayai:close")])
     return InlineKeyboardMarkup(rows)
+
+
+def _hearing_buttons() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Today", callback_data="ajayai:hearingday:today"),
+            InlineKeyboardButton("Tomorrow", callback_data="ajayai:hearingday:tomorrow"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="ajayai:close")],
+    ])
 
 
 async def _authorized(update: Update) -> bool:
@@ -78,6 +90,12 @@ async def ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("ajayai:coming:"):
         feature = data.rsplit(":", 1)[-1].replace("_", " ").title()
         await query.message.reply_text(f"🧠 {feature} is reserved for the next intelligence release.")
+        return ConversationHandler.END
+    if data == "ajayai:hearing":
+        await query.message.reply_text(
+            "⚖️ HEARING INTELLIGENCE\n\nChoose the hearing day for a grounded preparation brief.",
+            reply_markup=_hearing_buttons(),
+        )
         return ConversationHandler.END
     if data == "ajayai:case":
         context.user_data["ajay_ai_mode"] = "case_search"
@@ -159,6 +177,71 @@ async def ai_case_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _generate_case_brief(update, context, case_db_id)
 
 
+async def ai_hearing_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_ai_authorized(query.from_user.id):
+        await query.message.reply_text("🔒 Access denied.")
+        return ConversationHandler.END
+    choice = (query.data or "").rsplit(":", 1)[-1]
+    target = date.today()
+    try:
+        from datetime import datetime
+        target = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    except Exception:
+        pass
+    target += timedelta(days=1) if choice == "tomorrow" else timedelta()
+    label = "tomorrow" if choice == "tomorrow" else "today"
+    await query.message.reply_text(f"🧠 Loading verified office records and preparing {label}'s hearing brief…")
+    user_id = query.from_user.id
+    try:
+        await asyncio.to_thread(ensure_ai_schema)
+        hearing_context = await asyncio.to_thread(
+            OfficeKnowledgeService().build_hearing_day_context, target, 20
+        )
+        if not hearing_context.cases:
+            await query.message.reply_text(
+                f"No hearings were found in the connected master-case records for {target.strftime('%d-%m-%Y')}.\n\n"
+                "This does not confirm the Advocate Diaries cause list is empty; check the cause-list module if required.",
+                reply_markup=_menu(),
+            )
+            return ConversationHandler.END
+        store = AISessionStore()
+        session_id = await asyncio.to_thread(
+            store.create_session, user_id, "hearing_intelligence", target.isoformat()
+        )
+        request = f"Prepare the grounded hearing-intelligence brief for {target.isoformat()}."
+        await asyncio.to_thread(store.add_message, session_id, "user", request)
+        result = await asyncio.to_thread(
+            AIGateway(store=store).generate,
+            user_id=user_id,
+            session_id=session_id,
+            user_text=request,
+            feature="hearing_intelligence",
+            office_context=hearing_context.to_prompt(),
+        )
+        await asyncio.to_thread(store.add_message, session_id, "assistant", result.text)
+        await query.message.reply_text(
+            f"⚖️ HEARING INTELLIGENCE • {target.strftime('%d-%m-%Y')}\n"
+            f"Verified master-case matches: {len(hearing_context.cases)}"
+        )
+        for chunk in _split(result.text):
+            await query.message.reply_text(chunk)
+        if hearing_context.unavailable_sources:
+            safe = ", ".join(html.escape(item) for item in hearing_context.unavailable_sources)
+            await query.message.reply_text(f"ℹ️ Data not available to this brief: {safe}.")
+        await query.message.reply_text(
+            "⚠️ AI working note: verify the cause list, file contents, orders, facts, and law before court.",
+            reply_markup=_menu(),
+        )
+    except AIUnavailable as exc:
+        await query.message.reply_text(f"⚠️ Ajay AI unavailable\n\n{exc}")
+    except Exception as exc:
+        logger.exception("Ajay AI hearing-intelligence request failed")
+        await query.message.reply_text(f"❌ Hearing Intelligence failed safely: {type(exc).__name__}")
+    return ConversationHandler.END
+
+
 async def ai_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _authorized(update):
         return ConversationHandler.END
@@ -223,6 +306,7 @@ def build_ai_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
             CommandHandler("ai", ai_home),
+            CallbackQueryHandler(ai_hearing_day, pattern=r"^ajayai:hearingday:(today|tomorrow)$"),
             CallbackQueryHandler(ai_callback, pattern=r"^ajayai:(?!casepick:).+"),
         ],
         states={
