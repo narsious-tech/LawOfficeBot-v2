@@ -7,7 +7,7 @@ import math
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, redirect
 
 import requests
 import psycopg2
@@ -20,6 +20,14 @@ attendance_app = Flask(
     __name__,
     template_folder="templates"
 )
+
+@attendance_app.get("/health")
+def health():
+    return jsonify({"status": "ok", "service": "law-office-attendance"}), 200
+
+@attendance_app.get("/")
+def attendance_root():
+    return redirect("/attendance-app", code=302)
 
 BOT_TOKEN = os.getenv("TOKEN") or os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")

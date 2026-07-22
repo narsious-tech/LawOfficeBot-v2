@@ -7,6 +7,7 @@ import threading
 from telegram import WebAppInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from attendance_app import run_attendance_app
+from utils.attendance_webapp import get_attendance_app_url
 from commands.attendance import (
     attendance,
     checkin,
@@ -3242,7 +3243,7 @@ async def assignresponsibility(update, context):
     await update.message.reply_text("Responsibility assigned.")
 
 async def attendanceapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    app_url = os.getenv("ATTENDANCE_APP_URL")
+    app_url = get_attendance_app_url()
 
     if not app_url:
         await update.effective_message.reply_text(
