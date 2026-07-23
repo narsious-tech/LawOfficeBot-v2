@@ -16,6 +16,7 @@ from services.ecourts_backup_service import (
     approve_link,
     create_reconciled_drive_export,
     ensure_ecourts_schema,
+    inspect_backup_record,
     latest_reconciliation,
     synchronize_backups,
 )
@@ -293,6 +294,48 @@ async def ecourtsapprove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"❌ Approval failed: {exc}")
 
 
+def _field_lines(fields: list[str], empty_text: str) -> str:
+    if not fields:
+        return empty_text
+    return "\n".join(f"• <code>{html.escape(name)}</code>" for name in fields)
+
+
+async def ecourtsinspect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inspect the field names stored in one eCourts app backup record."""
+    if not await _authorize(update):
+        return
+    if len(context.args) != 1:
+        await update.effective_message.reply_text(
+            "Usage: <code>/ecourtsinspect 16_CHARACTER_CNR</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        result = await asyncio.to_thread(inspect_backup_record, context.args[0])
+        text = (
+            "🔍 <b>eCOURTS BACKUP INSPECTION</b>\n\n"
+            f"CNR: <code>{html.escape(result['cino'])}</code>\n"
+            f"Case: <b>{html.escape(str(result.get('display_case_number') or '-'))}</b>\n"
+            f"Backup: <b>{html.escape(str(result.get('source_kind') or '-'))}</b>\n"
+            f"Fields stored: <b>{int(result.get('field_count') or 0)}</b>\n\n"
+            "📄 <b>ORDER / DOCUMENT FIELDS</b>\n"
+            f"{_field_lines(result['order_fields'], '❌ None found')}\n\n"
+            "🔗 <b>REFERENCE / DOWNLOAD-LIKE FIELDS</b>\n"
+            f"{_field_lines(result['reference_fields'], '❌ None found')}\n\n"
+            "🧾 <b>ALL POPULATED FIELD NAMES</b>\n"
+            f"{_field_lines(result['populated_fields'], 'No populated fields found.')}\n\n"
+            "Only field names are shown; backup values are not exposed."
+        )
+        await update.effective_message.reply_text(
+            text[:4096], parse_mode=ParseMode.HTML,
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"❌ Inspection failed safely: {html.escape(str(exc))}",
+            parse_mode=ParseMode.HTML,
+        )
+
+
 async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -394,4 +437,5 @@ def register_ecourts_handlers(app) -> None:
     app.add_handler(CommandHandler("ecourtsmissing", ecourtsmissing))
     app.add_handler(CommandHandler("ecourtsreport", ecourtsreport))
     app.add_handler(CommandHandler("ecourtsapprove", ecourtsapprove))
+    app.add_handler(CommandHandler("ecourtsinspect", ecourtsinspect))
     app.add_handler(CallbackQueryHandler(ecourts_callback, pattern=r"^ecr:"))
