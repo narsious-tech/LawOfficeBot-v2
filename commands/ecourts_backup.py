@@ -17,11 +17,33 @@ from services.ecourts_backup_service import (
     create_reconciled_drive_export,
     ensure_ecourts_schema,
     inspect_backup_record,
+    list_ecourts_changes,
     latest_reconciliation,
+    mark_ecourts_changes_alerted,
     synchronize_backups,
+)
+from services.ecourts_order_service import (
+    list_orders,
+    mark_orders_alerted,
+    scan_order_inbox,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _admin_destinations() -> list[int]:
+    values = [
+        os.getenv("ADMIN_USER_ID", ""),
+        os.getenv("AI_ADMIN_USER_IDS", ""),
+        os.getenv("ADMIN_CHAT_ID", ""),
+    ]
+    result: set[int] = set()
+    for value in values:
+        for item in str(value).split(","):
+            item = item.strip()
+            if item.lstrip("-").isdigit():
+                result.add(int(item))
+    return sorted(result)
 
 
 def _admin(user_id: int | None) -> bool:
@@ -117,6 +139,11 @@ async def syncecourts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await waiting.edit_text(
             _summary(data), parse_mode=ParseMode.HTML, reply_markup=_keyboard()
         )
+        if data.get("change_count"):
+            await update.effective_message.reply_text(
+                f"🔔 {int(data['change_count'])} eCourts field change(s) detected.\n"
+                "Use /ecourtschanges to review them."
+            )
     except Exception as exc:
         logger.exception("eCourts backup synchronization failed")
         await waiting.edit_text(
@@ -336,6 +363,175 @@ async def ecourtsinspect(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+FIELD_LABELS = {
+    "next_hearing_date": "📅 Next hearing date",
+    "last_hearing_date": "⏮ Last hearing date",
+    "purpose_name": "📝 Hearing purpose",
+    "court_designation": "🏛 Court / Judge",
+    "decision_date": "⚖️ Decision date",
+    "disposal_name": "🏁 Disposal status",
+    "updated": "🔄 eCourts record updated",
+}
+
+
+def _change_text(item: dict) -> str:
+    icon = "🚨" if item.get("severity") == "CRITICAL" else (
+        "⚠️" if item.get("severity") == "IMPORTANT" else "ℹ️"
+    )
+    label = FIELD_LABELS.get(item.get("field_name"), item.get("field_name") or "Field")
+    return (
+        f"{icon} <b>{html.escape(str(item.get('display_case_number') or '-'))}</b>\n"
+        f"CNR: <code>{html.escape(str(item.get('cino') or '-'))}</code>\n"
+        f"{label}\n"
+        f"Previous: <code>{html.escape(str(item.get('old_value') or 'Not recorded'))}</code>\n"
+        f"New: <code>{html.escape(str(item.get('new_value') or 'Not recorded'))}</code>"
+    )
+
+
+async def ecourtschanges(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
+    rows = await asyncio.to_thread(list_ecourts_changes, 200, False)
+    page_size = 8
+    pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = min(max(1, page), pages)
+    selected = rows[(page - 1) * page_size:page * page_size]
+    lines = [
+        "🔔 <b>eCOURTS CHANGE HISTORY</b>",
+        f"Page {page}/{pages} · Latest {len(rows)} change(s)",
+        "",
+    ]
+    if not selected:
+        lines.append("No changes have been detected yet.")
+    else:
+        lines.extend(_change_text(item) + "\n" for item in selected)
+    await update.effective_message.reply_text(
+        "\n".join(lines)[:4096], parse_mode=ParseMode.HTML,
+    )
+
+
+def _order_text(item: dict, include_summary: bool = False) -> str:
+    processing_status = item.get("processing_status") or item.get("status")
+    status_icons = {
+        "ARCHIVED": "✅", "MATCHED": "🟢", "DUPLICATE": "♻️",
+        "UNMATCHED": "🟠", "FAILED": "❌",
+    }
+    importance_icons = {"CRITICAL": "🚨", "IMPORTANT": "⚠️", "NORMAL": "📄"}
+    lines = [
+        f"{importance_icons.get(item.get('importance'), '📄')} "
+        f"<b>{html.escape(str(item.get('original_name') or 'Order PDF'))}</b>",
+        f"{status_icons.get(processing_status, 'ℹ️')} "
+        f"Status: <b>{html.escape(str(processing_status or '-'))}</b>",
+        f"Case: <b>{html.escape(str(item.get('case_number') or 'Not matched'))}</b>",
+        f"CNR: <code>{html.escape(str(item.get('cino') or '-'))}</code>",
+    ]
+    link = item.get("archived_drive_link") or item.get("original_link")
+    if link:
+        lines.append(f"🔗 {html.escape(str(link))}")
+    if item.get("error_message"):
+        lines.append(f"Reason: {html.escape(str(item['error_message'])[:500])}")
+    if include_summary and item.get("ai_summary"):
+        lines.extend(["", "🤖 <b>AI WORKING NOTE</b>", html.escape(str(item["ai_summary"]))])
+    return "\n".join(lines)
+
+
+async def ecourtsorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    rows = await asyncio.to_thread(list_orders, 10, False)
+    if not rows:
+        await update.effective_message.reply_text(
+            "📥 No order PDFs have been processed yet.\n\n"
+            "Place PDFs in the Drive folder <b>eCourts Order Inbox</b>, then run "
+            "<code>/syncecourtsorders</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    for item in rows:
+        await update.effective_message.reply_text(
+            _order_text(item, include_summary=False)[:4096],
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
+
+async def syncecourtsorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    waiting = await update.effective_message.reply_text(
+        "⏳ Scanning the Google Drive eCourts Order Inbox…"
+    )
+    try:
+        result = await asyncio.to_thread(scan_order_inbox, 10, True)
+        await waiting.edit_text(
+            "✅ Order Inbox scan complete.\n\n"
+            f"PDFs present: {result['files_seen']}\n"
+            f"Processed/retried: {result['processed_count']}\n\n"
+            "Use /ecourtsorders to review the results."
+        )
+        for item in result["results"]:
+            await update.effective_message.reply_text(
+                _order_text(item, include_summary=True)[:4096],
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+    except Exception as exc:
+        logger.exception("eCourts order inbox scan failed")
+        await waiting.edit_text(
+            f"❌ Order Inbox scan failed safely: {type(exc).__name__}: {str(exc)[:800]}"
+        )
+
+
+async def _alert_changes(context: ContextTypes.DEFAULT_TYPE) -> None:
+    changes = await asyncio.to_thread(list_ecourts_changes, 100, True)
+    if not changes:
+        return
+    destinations = _admin_destinations()
+    sent = False
+    for destination in destinations:
+        for item in changes:
+            try:
+                await context.bot.send_message(
+                    chat_id=destination,
+                    text="🔔 <b>eCOURTS CHANGE DETECTED</b>\n\n" + _change_text(item),
+                    parse_mode=ParseMode.HTML,
+                )
+                sent = True
+            except Exception:
+                logger.exception("Could not deliver eCourts change alert")
+    if sent:
+        await asyncio.to_thread(
+            mark_ecourts_changes_alerted, [int(item["id"]) for item in changes]
+        )
+
+
+async def _alert_orders(context: ContextTypes.DEFAULT_TYPE) -> None:
+    orders = await asyncio.to_thread(list_orders, 25, True)
+    if not orders:
+        return
+    destinations = _admin_destinations()
+    alerted: list[int] = []
+    for item in orders:
+        delivered = False
+        for destination in destinations:
+            try:
+                await context.bot.send_message(
+                    chat_id=destination,
+                    text="📥 <b>NEW eCOURTS ORDER PDF</b>\n\n"
+                    + _order_text(item, include_summary=True)[:3900],
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                delivered = True
+            except Exception:
+                logger.exception("Could not deliver eCourts order alert")
+        if delivered:
+            alerted.append(int(item["id"]))
+    if alerted:
+        await asyncio.to_thread(mark_orders_alerted, alerted)
+
+
 async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -427,8 +623,21 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ecourts_backup_sync_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         await asyncio.to_thread(synchronize_backups, None)
+        await _alert_changes(context)
     except Exception:
         logger.exception("Scheduled eCourts backup synchronization failed")
+
+
+async def ecourts_order_inbox_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await asyncio.to_thread(
+            scan_order_inbox,
+            max(1, int(os.getenv("ECOURTS_ORDER_MAX_FILES_PER_SCAN", "5"))),
+            False,
+        )
+        await _alert_orders(context)
+    except Exception:
+        logger.exception("Scheduled eCourts order inbox scan failed")
 
 
 def register_ecourts_handlers(app) -> None:
@@ -438,4 +647,7 @@ def register_ecourts_handlers(app) -> None:
     app.add_handler(CommandHandler("ecourtsreport", ecourtsreport))
     app.add_handler(CommandHandler("ecourtsapprove", ecourtsapprove))
     app.add_handler(CommandHandler("ecourtsinspect", ecourtsinspect))
+    app.add_handler(CommandHandler("ecourtschanges", ecourtschanges))
+    app.add_handler(CommandHandler("ecourtsorders", ecourtsorders))
+    app.add_handler(CommandHandler("syncecourtsorders", syncecourtsorders))
     app.add_handler(CallbackQueryHandler(ecourts_callback, pattern=r"^ecr:"))
