@@ -191,6 +191,7 @@ from commands.whatsapp_admin import register_whatsapp_handlers, whatsapp_retry_j
 from commands.ecourts_backup import (
     register_ecourts_handlers,
     ecourts_backup_sync_job,
+    ecourts_order_inbox_job,
 )
 from commands.mobile_update_queue import (
     mobileupdatequeue,
@@ -4028,6 +4029,13 @@ app.job_queue.run_repeating(
     interval=max(3600, int(os.getenv("ECOURTS_BACKUP_SYNC_HOURS", "6")) * 3600),
     first=180,
     name="ecourts_drive_backup_reconciliation",
+)
+
+app.job_queue.run_repeating(
+    ecourts_order_inbox_job,
+    interval=max(300, int(os.getenv("ECOURTS_ORDER_POLL_SECONDS", "900"))),
+    first=240,
+    name="ecourts_drive_order_inbox",
 )
 
 app.job_queue.run_repeating(
