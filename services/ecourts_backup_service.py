@@ -375,14 +375,44 @@ def _reconcile(
     linked_cino = {row[1] for row in all_links}
     office_only = [item for item in locals_ if item["_pk"] not in linked_local]
     backup_only = [item for item in backups if item["cino"] not in linked_cino]
+    possible_local_ids = {
+        str(item["local"]["_pk"])
+        for item in possible
+    }
+    no_candidate = [
+        item for item in office_only
+        if str(item["_pk"]) not in possible_local_ids
+    ]
+    backup_only_active = [
+        item for item in backup_only
+        if not item.get("decision_date")
+        and not item.get("disposal_name")
+        and item.get("next_hearing_date")
+    ]
+    backup_only_disposed = [
+        item for item in backup_only
+        if item.get("decision_date") or item.get("disposal_name")
+    ]
+    backup_only_unknown = [
+        item for item in backup_only
+        if item not in backup_only_active and item not in backup_only_disposed
+    ]
     return {
         "matched_count": len(all_links),
         "possible_count": len(possible),
         "office_only_count": len(office_only),
+        "no_candidate_count": len(no_candidate),
         "backup_only_count": len(backup_only),
+        "backup_only_active_count": len(backup_only_active),
+        "backup_only_disposed_count": len(backup_only_disposed),
+        "backup_only_unknown_count": len(backup_only_unknown),
         "conflict_count": len(conflicts),
         "office_only": office_only,
+        "no_candidate": no_candidate,
         "backup_only": backup_only,
+        "backup_only_active": backup_only_active,
+        "backup_only_disposed": backup_only_disposed,
+        "backup_only_unknown": backup_only_unknown,
         "possible": possible,
         "conflicts": conflicts,
     }
