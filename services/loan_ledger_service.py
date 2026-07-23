@@ -195,7 +195,9 @@ def create_loan(
     principal: Decimal,
     monthly_rate: Decimal,
     loan_date: date,
-    next_due_date: date,
+    disbursement_mode: str,
+    disbursement_reference: str | None,
+    first_interest_collected: bool,
     maturity_date: date | None,
     guarantor_name: str | None,
     guarantor_phone: str | None,
@@ -206,6 +208,7 @@ def create_loan(
     actor_id: int,
 ) -> int:
     ensure_loan_schema()
+    next_due_date = add_month(loan_date) if first_interest_collected else loan_date
     conn = psycopg2.connect(DATABASE_URL)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -228,8 +231,26 @@ def create_loan(
                 INSERT INTO private_loan_transactions (
                     loan_id,transaction_date,transaction_type,amount,payment_mode,
                     reference_note,principal_before,principal_after,created_by
-                ) VALUES (%s,%s,'DISBURSEMENT',%s,'NOT_RECORDED','Loan disbursed',%s,%s,%s)
-            """, (loan_id, loan_date, principal, Decimal("0"), principal, actor_id))
+                ) VALUES (%s,%s,'DISBURSEMENT',%s,%s,%s,%s,%s,%s)
+            """, (
+                loan_id, loan_date, principal, disbursement_mode,
+                disbursement_reference or "Loan disbursed",
+                Decimal("0"), principal, actor_id,
+            ))
+            if first_interest_collected:
+                first_interest = (principal * monthly_rate / Decimal("100")).quantize(
+                    MONEY, rounding=ROUND_HALF_UP
+                )
+                cur.execute("""
+                    INSERT INTO private_loan_transactions (
+                        loan_id,transaction_date,transaction_type,amount,payment_mode,
+                        reference_note,principal_before,principal_after,created_by
+                    ) VALUES (%s,%s,'INTEREST_RECEIVED',%s,%s,
+                        'First advance interest collected at disbursement',%s,%s,%s)
+                """, (
+                    loan_id, loan_date, first_interest, disbursement_mode,
+                    principal, principal, actor_id,
+                ))
             for document in documents:
                 cur.execute("""
                     INSERT INTO private_loan_documents
@@ -239,9 +260,13 @@ def create_loan(
             cur.execute("""
                 INSERT INTO private_loan_audit(loan_id,action,details,actor_id)
                 VALUES (%s,'LOAN_CREATED',jsonb_build_object(
-                    'account_number',%s,'principal',%s,'monthly_rate',%s
+                    'account_number',%s,'principal',%s,'monthly_rate',%s,
+                    'first_interest_collected',%s,'next_interest_due_date',%s
                 ),%s)
-            """, (loan_id, account, str(principal), str(monthly_rate), actor_id))
+            """, (
+                loan_id, account, str(principal), str(monthly_rate),
+                first_interest_collected, str(next_due_date), actor_id,
+            ))
         conn.commit()
         return loan_id
     except Exception:
@@ -303,7 +328,9 @@ def record_payment(
     note: str,
     actor_id: int,
 ) -> dict[str, Any]:
-    if payment_type not in {"INTEREST_RECEIVED", "PRINCIPAL_RECEIVED"}:
+    if payment_type not in {
+        "INTEREST_RECEIVED", "PRINCIPAL_RECEIVED", "OPENING_INTEREST_RECEIVED"
+    }:
         raise ValueError("Invalid loan payment type.")
     ensure_loan_schema()
     conn = psycopg2.connect(DATABASE_URL)
@@ -325,6 +352,24 @@ def record_payment(
                 if amount > before:
                     raise ValueError("Principal receipt cannot exceed the outstanding principal.")
                 after = (before - amount).quantize(MONEY)
+            elif payment_type == "OPENING_INTEREST_RECEIVED":
+                scheduled = monthly_interest(loan)
+                if amount != scheduled:
+                    raise ValueError(
+                        f"Opening interest must equal one monthly installment of {scheduled:.2f}."
+                    )
+                if next_due <= loan["loan_date"]:
+                    raise ValueError(
+                        "This account does not need opening-interest correction; "
+                        "record a normal interest receipt."
+                    )
+                cur.execute("""
+                    SELECT 1 FROM private_loan_transactions
+                    WHERE loan_id=%s AND transaction_type='INTEREST_RECEIVED'
+                    LIMIT 1
+                """, (loan_id,))
+                if cur.fetchone():
+                    raise ValueError("Opening interest has already been recorded for this account.")
             else:
                 scheduled = monthly_interest(loan)
                 if scheduled > 0:
@@ -337,12 +382,20 @@ def record_payment(
                     if cycles > 0:
                         next_due = add_month(next_due, cycles)
             status = "CLOSED" if after == 0 else loan["status"]
+            stored_type = (
+                "INTEREST_RECEIVED"
+                if payment_type == "OPENING_INTEREST_RECEIVED"
+                else payment_type
+            )
             cur.execute("""
                 INSERT INTO private_loan_transactions (
                     loan_id,transaction_date,transaction_type,amount,payment_mode,
                     reference_note,principal_before,principal_after,created_by
                 ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
-            """, (loan_id, payment_date, payment_type, amount, payment_mode, note, before, after, actor_id))
+            """, (
+                loan_id, payment_date, stored_type, amount, payment_mode, note,
+                before, after, actor_id,
+            ))
             transaction_id = int(cur.fetchone()["id"])
             cur.execute("""
                 UPDATE private_loans SET outstanding_principal=%s,
