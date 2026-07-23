@@ -188,6 +188,10 @@ from commands.mobile_audit import (
 from commands.finance_ledger import register_ledger_handlers
 from commands.loan_ledger import register_loan_ledger_handlers, loan_interest_reminder_job
 from commands.whatsapp_admin import register_whatsapp_handlers, whatsapp_retry_job
+from commands.ecourts_backup import (
+    register_ecourts_handlers,
+    ecourts_backup_sync_job,
+)
 from commands.mobile_update_queue import (
     mobileupdatequeue,
     mobileupdatequeuesummary,
@@ -4009,11 +4013,21 @@ register_loan_ledger_handlers(app)
 # WhatsApp Cloud API transport, inbox and diagnostics
 register_whatsapp_handlers(app)
 
+# Administrator-only eCourts backup reconciliation
+register_ecourts_handlers(app)
+
 app.job_queue.run_repeating(
     whatsapp_retry_job,
     interval=600,
     first=90,
     name="whatsapp_cloud_retry_queue",
+)
+
+app.job_queue.run_repeating(
+    ecourts_backup_sync_job,
+    interval=max(3600, int(os.getenv("ECOURTS_BACKUP_SYNC_HOURS", "6")) * 3600),
+    first=180,
+    name="ecourts_drive_backup_reconciliation",
 )
 
 app.job_queue.run_repeating(
