@@ -1,5 +1,19 @@
 # Sprint 23 — Private Loan Ledger & Interest Reminders
 
+## Sprint 23.1 accounting refinement
+
+The creation wizard now asks for the disbursement mode/reference and whether
+the first month's advance interest was actually collected.
+
+- If collected, an interest receipt is created automatically and the next due
+  date becomes one month after the loan date.
+- If not collected, the first interest remains due on the loan date.
+- Users no longer type an arbitrary first due date.
+- Currency is displayed using Indian digit grouping.
+- **Opening Interest Correction** safely records the first installment for a
+  legacy account whose due date was already advanced without a receipt. It
+  does not advance that date a second time and refuses duplicate correction.
+
 ## Access
 
 The loan ledger is separate from the staff financial ledger. It works only:
@@ -78,9 +92,9 @@ ADMIN_USER_ID=<Ajay Telegram user ID>
 ## Verification
 
 1. Confirm `/loanledger` opens only for Ajay in private chat.
-2. Create a small test loan.
-3. Verify the calculated monthly interest.
-4. Record one interest installment.
+2. Create one test loan with first advance interest collected and one without.
+3. Verify the automatic receipt and calculated due dates.
+4. Record one normal interest installment.
 5. Confirm the next due date advances by one month.
 6. Record a principal payment after interest is current.
 7. Confirm outstanding principal and future interest reduce.
