@@ -186,6 +186,7 @@ from commands.mobile_audit import (
 
 
 from commands.finance_ledger import register_ledger_handlers
+from commands.loan_ledger import register_loan_ledger_handlers, loan_interest_reminder_job
 from commands.mobile_update_queue import (
     mobileupdatequeue,
     mobileupdatequeuesummary,
@@ -4001,6 +4002,9 @@ app.add_handler(CallbackQueryHandler(evening_file_selection_callback, pattern=r"
 # Sprint 8 private ledger handlers
 register_ledger_handlers(app)
 
+# Sprint 23 administrator-only private loan ledger
+register_loan_ledger_handlers(app)
+
 app.job_queue.run_repeating(
     monitor_attendance_job,
     interval=300,
@@ -4011,6 +4015,12 @@ app.job_queue.run_repeating(
     interval=max(60, int(os.getenv("EMAIL_ALERT_POLL_SECONDS", "300"))),
     first=45,
     name="office_email_monitor"
+)
+
+app.job_queue.run_daily(
+    loan_interest_reminder_job,
+    time=time(hour=10, minute=0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="private_loan_interest_reminder_1000am",
 )
 
 
