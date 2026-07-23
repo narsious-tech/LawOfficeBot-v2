@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import html
+import io
 import logging
 import os
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
@@ -52,13 +54,14 @@ def _keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Synchronize Backups", callback_data="ecr:sync")],
         [
-            InlineKeyboardButton("🔴 Missing from Backup", callback_data="ecr:office"),
+            InlineKeyboardButton("🔴 Not Linked", callback_data="ecr:office:1"),
             InlineKeyboardButton("🔵 Backup Only", callback_data="ecr:backup"),
         ],
         [
             InlineKeyboardButton("🟠 Possible Matches", callback_data="ecr:possible"),
             InlineKeyboardButton("⚠️ Conflicts", callback_data="ecr:conflicts"),
         ],
+        [InlineKeyboardButton("📊 Download Full Report", callback_data="ecr:report")],
         [InlineKeyboardButton("📤 Create Reconciled Copy", callback_data="ecr:export")],
         [InlineKeyboardButton("❌ Close", callback_data="ecr:close")],
     ])
@@ -79,8 +82,11 @@ def _summary(data: dict) -> str:
         f"High Court backup: <b>{data.get('high_court_count', 0)}</b>\n\n"
         f"✅ Matched: <b>{data.get('matched_count', 0)}</b>\n"
         f"🟠 Possible matches: <b>{data.get('possible_count', 0)}</b>\n"
-        f"🔴 Office cases missing from backup: <b>{data.get('office_only_count', 0)}</b>\n"
+        f"🔴 No backup candidate found: <b>{data.get('no_candidate_count', 0)}</b>\n"
         f"🔵 Backup cases missing from Office OS: <b>{data.get('backup_only_count', 0)}</b>\n"
+        f"   • Active: <b>{data.get('backup_only_active_count', 0)}</b>\n"
+        f"   • Disposed: <b>{data.get('backup_only_disposed_count', 0)}</b>\n"
+        f"   • Unknown: <b>{data.get('backup_only_unknown_count', 0)}</b>\n"
         f"⚠️ Conflicts: <b>{data.get('conflict_count', 0)}</b>\n\n"
         "Original eCourts backup files remain unchanged."
     )
@@ -119,7 +125,7 @@ async def syncecourts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-def _render_list(kind: str, data: dict) -> str:
+def _render_list(kind: str, data: dict, page: int = 1, page_size: int = 15) -> str:
     headings = {
         "office": "🔴 OFFICE CASES MISSING FROM eCOURTS BACKUP",
         "backup": "🔵 eCOURTS BACKUP CASES MISSING FROM OFFICE OS",
@@ -133,14 +139,31 @@ def _render_list(kind: str, data: dict) -> str:
         "possible": data.get("possible", []),
         "conflicts": data.get("conflicts", []),
     }[kind]
+    page = max(1, int(page or 1))
+    total_pages = max(1, (len(items) + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    start = (page - 1) * page_size
+    page_items = items[start:start + page_size]
+    lines.append(f"Page {page}/{total_pages} · Total {len(items)}")
+    lines.append("")
     if not items:
         lines.append("No records in this category.")
-    for index, item in enumerate(items[:30], start=1):
+    possible_ids = {
+        str(item["local"]["_pk"])
+        for item in data.get("possible", [])
+    }
+    for index, item in enumerate(page_items, start=start + 1):
         if kind == "office":
+            state = (
+                "🟠 Possible match available"
+                if str(item.get("_pk")) in possible_ids
+                else "🔴 No candidate · CNR required"
+            )
             lines.append(
                 f"{index}. <b>{html.escape(str(item.get('_number') or '-'))}</b>\n"
                 f"   {html.escape(str(item.get('case_title') or item.get('client_name') or '-'))}\n"
-                f"   Local ID: <code>{html.escape(str(item.get('_pk')))}</code> · CNR required"
+                f"   Local ID: <code>{html.escape(str(item.get('_pk')))}</code>\n"
+                f"   {state}"
             )
         elif kind == "backup":
             lines.append(
@@ -165,17 +188,88 @@ def _render_list(kind: str, data: dict) -> str:
                 f"   {html.escape(str(item.get('reason') or 'Review required'))}"
             )
         lines.append("")
-    if len(items) > 30:
-        lines.append(f"Showing 30 of {len(items)} records.")
     return "\n".join(lines)[:4000]
+
+
+def _page_keyboard(kind: str, page: int, total: int, page_size: int = 15):
+    pages = max(1, (total + page_size - 1) // page_size)
+    rows = []
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"ecr:{kind}:{page-1}"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"ecr:{kind}:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("📊 Download Full Report", callback_data="ecr:report")])
+    rows.append([InlineKeyboardButton("⬅️ Dashboard", callback_data="ecr:home")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def ecourtsmissing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _authorize(update):
         return
     data = await asyncio.to_thread(latest_reconciliation)
+    page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
     await update.effective_message.reply_text(
-        _render_list("office", data), parse_mode=ParseMode.HTML
+        _render_list("office", data, page),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_page_keyboard(
+            "office", page, len(data.get("office_only", []))
+        ),
+    )
+
+
+def _report_bytes(data: dict) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow([
+        "Category", "Local ID", "Office Case Number", "Office Title",
+        "CNR", "eCourts Case Number", "Petitioner", "Respondent",
+        "eCourts Status", "Confidence", "Required Action",
+    ])
+    possible_by_local = {
+        str(item["local"]["_pk"]): item
+        for item in data.get("possible", [])
+    }
+    for local in data.get("office_only", []):
+        possible = possible_by_local.get(str(local.get("_pk")))
+        backup = possible.get("backup") if possible else {}
+        writer.writerow([
+            "POSSIBLE_MATCH" if possible else "NO_BACKUP_CANDIDATE",
+            local.get("_pk"), local.get("_number"),
+            local.get("case_title") or local.get("client_name"),
+            backup.get("cino"), backup.get("display_case_number"),
+            backup.get("petitioner_name"), backup.get("respondent_name"), "",
+            f"{float(possible.get('confidence')):.2%}" if possible else "",
+            "Approve after verification" if possible else "Locate/add CNR",
+        ])
+    for item in data.get("backup_only", []):
+        if item in data.get("backup_only_disposed", []):
+            state = "DISPOSED"
+        elif item in data.get("backup_only_active", []):
+            state = "ACTIVE"
+        else:
+            state = "UNKNOWN"
+        writer.writerow([
+            f"BACKUP_ONLY_{state}", "", "", "", item.get("cino"),
+            item.get("display_case_number"), item.get("petitioner_name"),
+            item.get("respondent_name"), state, "", "Review before importing",
+        ])
+    return ("\ufeff" + output.getvalue()).encode("utf-8")
+
+
+async def ecourtsreport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    data = await asyncio.to_thread(latest_reconciliation)
+    content = _report_bytes(data)
+    await update.effective_message.reply_document(
+        document=InputFile(io.BytesIO(content), filename="ecourts-reconciliation.csv"),
+        caption=(
+            "📊 Full eCourts reconciliation report\n"
+            "Includes every unlinked Office case, possible match, and backup-only case."
+        ),
     )
 
 
@@ -204,9 +298,25 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if not await _authorize(update):
         return
-    action = (query.data or "").split(":")[-1]
+    parts = (query.data or "").split(":")
+    action = parts[1] if len(parts) > 1 else "home"
+    page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
     if action == "close":
         await query.edit_message_text("eCourts reconciliation closed.")
+        return
+    if action == "home":
+        data = await asyncio.to_thread(latest_reconciliation)
+        await query.edit_message_text(
+            _summary(data), parse_mode=ParseMode.HTML, reply_markup=_keyboard()
+        )
+        return
+    if action == "report":
+        data = await asyncio.to_thread(latest_reconciliation)
+        content = _report_bytes(data)
+        await query.message.reply_document(
+            document=InputFile(io.BytesIO(content), filename="ecourts-reconciliation.csv"),
+            caption="📊 Complete administrator reconciliation report.",
+        )
         return
     if action == "sync":
         await query.edit_message_text("⏳ Synchronizing both Drive backups…")
@@ -243,8 +353,31 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ Export failed safely: {exc}", reply_markup=_keyboard())
         return
     data = await asyncio.to_thread(latest_reconciliation)
+    if action == "backup":
+        text = (
+            "🔵 <b>BACKUP-ONLY CLASSIFICATION</b>\n\n"
+            f"🟢 Active: <b>{data.get('backup_only_active_count', 0)}</b>\n"
+            f"⚫ Disposed: <b>{data.get('backup_only_disposed_count', 0)}</b>\n"
+            f"⚪ Unknown: <b>{data.get('backup_only_unknown_count', 0)}</b>\n\n"
+            "Download the full report for every case and CNR."
+        )
+        await query.message.reply_text(
+            text, parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Download Full Report", callback_data="ecr:report")],
+                [InlineKeyboardButton("⬅️ Dashboard", callback_data="ecr:home")],
+            ]),
+        )
+        return
+    items = {
+        "office": data.get("office_only", []),
+        "possible": data.get("possible", []),
+        "conflicts": data.get("conflicts", []),
+    }.get(action, [])
     await query.message.reply_text(
-        _render_list(action, data), parse_mode=ParseMode.HTML
+        _render_list(action, data, page),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_page_keyboard(action, page, len(items)),
     )
 
 
@@ -259,5 +392,6 @@ def register_ecourts_handlers(app) -> None:
     app.add_handler(CommandHandler("ecourts", ecourts))
     app.add_handler(CommandHandler("syncecourts", syncecourts))
     app.add_handler(CommandHandler("ecourtsmissing", ecourtsmissing))
+    app.add_handler(CommandHandler("ecourtsreport", ecourtsreport))
     app.add_handler(CommandHandler("ecourtsapprove", ecourtsapprove))
     app.add_handler(CallbackQueryHandler(ecourts_callback, pattern=r"^ecr:"))
