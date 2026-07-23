@@ -110,12 +110,32 @@ def ensure_ecourts_schema() -> None:
             )
         """)
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS ecourts_case_changes (
+                id BIGSERIAL PRIMARY KEY,
+                sync_run_id BIGINT REFERENCES ecourts_backup_sync_runs(id),
+                cino TEXT NOT NULL,
+                local_case_pk TEXT,
+                display_case_number TEXT,
+                field_name TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                severity TEXT NOT NULL DEFAULT 'INFO',
+                detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                alerted_at TIMESTAMPTZ,
+                UNIQUE(sync_run_id, cino, field_name)
+            )
+        """)
+        cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_ecourts_backup_case_number
             ON ecourts_backup_records(display_case_number)
         """)
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_ecourts_backup_last_run
             ON ecourts_backup_records(last_sync_run_id)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ecourts_changes_detected
+            ON ecourts_case_changes(detected_at DESC)
         """)
         cur.execute("ALTER TABLE cases ADD COLUMN IF NOT EXISTS ecourts_cnr TEXT")
         cur.execute(
@@ -488,6 +508,57 @@ def synchronize_backups(actor_id: int | None = None) -> dict[str, Any]:
         district = parse_backup(_download_text(DISTRICT_BACKUP_ID), "DISTRICT")
         high_court = parse_backup(_download_text(HIGH_COURT_BACKUP_ID), "HIGH_COURT")
         records = district + high_court
+        cinos = [item["cino"] for item in records]
+        existing: dict[str, dict[str, Any]] = {}
+        if cinos:
+            cur.execute("""
+                SELECT cino, next_hearing_date, last_hearing_date,
+                       purpose_name, court_designation, decision_date,
+                       disposal_name, raw_payload
+                FROM ecourts_backup_records
+                WHERE cino = ANY(%s)
+            """, (cinos,))
+            for row in cur.fetchall():
+                existing[row[0]] = {
+                    "next_hearing_date": row[1],
+                    "last_hearing_date": row[2],
+                    "purpose_name": row[3],
+                    "court_designation": row[4],
+                    "decision_date": row[5],
+                    "disposal_name": row[6],
+                    "updated": (row[7] or {}).get("updated") if isinstance(row[7], dict) else None,
+                }
+        tracked = (
+            "next_hearing_date", "last_hearing_date", "purpose_name",
+            "court_designation", "decision_date", "disposal_name", "updated",
+        )
+        detected_changes: list[dict[str, Any]] = []
+        for item in records:
+            old = existing.get(item["cino"])
+            if not old:
+                continue
+            current = dict(item)
+            current["updated"] = item["raw_payload"].get("updated")
+            for field in tracked:
+                before = old.get(field)
+                after = current.get(field)
+                before_text = "" if before is None else str(before)
+                after_text = "" if after is None else str(after)
+                if before_text == after_text:
+                    continue
+                severity = "INFO"
+                if field in {"decision_date", "disposal_name"} and after_text:
+                    severity = "CRITICAL"
+                elif field in {"next_hearing_date", "purpose_name", "court_designation"}:
+                    severity = "IMPORTANT"
+                detected_changes.append({
+                    "cino": item["cino"],
+                    "display_case_number": item["display_case_number"],
+                    "field_name": field,
+                    "old_value": before_text or None,
+                    "new_value": after_text or None,
+                    "severity": severity,
+                })
         values = [(
             item["cino"], item["source_kind"], item["case_type"],
             item["registration_number"], item["registration_year"],
@@ -535,6 +606,23 @@ def synchronize_backups(actor_id: int | None = None) -> dict[str, Any]:
                     last_sync_run_id=EXCLUDED.last_sync_run_id
             """, values)
         result = _reconcile(cur, run_id, actor_id, apply_auto_links=True)
+        for change in detected_changes:
+            cur.execute("""
+                SELECT local_case_pk FROM ecourts_case_links
+                WHERE cino=%s AND link_status='APPROVED'
+            """, (change["cino"],))
+            linked = cur.fetchone()
+            cur.execute("""
+                INSERT INTO ecourts_case_changes (
+                    sync_run_id, cino, local_case_pk, display_case_number,
+                    field_name, old_value, new_value, severity
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (sync_run_id, cino, field_name) DO NOTHING
+            """, (
+                run_id, change["cino"], linked[0] if linked else None,
+                change["display_case_number"], change["field_name"],
+                change["old_value"], change["new_value"], change["severity"],
+            ))
         cur.execute("""
             UPDATE ecourts_backup_sync_runs SET
                 finished_at=NOW(), status='SUCCESS',
@@ -554,6 +642,8 @@ def synchronize_backups(actor_id: int | None = None) -> dict[str, Any]:
             "district_count": len(district),
             "high_court_count": len(high_court),
             "total_backup_count": len(records),
+            "change_count": len(detected_changes),
+            "changes": detected_changes,
         })
         return result
     except Exception as exc:
@@ -566,6 +656,45 @@ def synchronize_backups(actor_id: int | None = None) -> dict[str, Any]:
             """, (f"{type(exc).__name__}: {exc}"[:2000], run_id))
             conn.commit()
         raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def list_ecourts_changes(limit: int = 50, only_unalerted: bool = False) -> list[dict[str, Any]]:
+    ensure_ecourts_schema()
+    conn = _conn()
+    cur = conn.cursor()
+    try:
+        where = "WHERE ch.alerted_at IS NULL" if only_unalerted else ""
+        cur.execute(f"""
+            SELECT ch.id, ch.cino, ch.display_case_number, ch.field_name,
+                   ch.old_value, ch.new_value, ch.severity, ch.detected_at,
+                   ch.alerted_at, c.case_title, c.client_name
+            FROM ecourts_case_changes ch
+            LEFT JOIN cases c ON c.id::text=ch.local_case_pk
+            {where}
+            ORDER BY ch.id DESC
+            LIMIT %s
+        """, (max(1, min(int(limit), 200)),))
+        names = [item[0] for item in cur.description]
+        return [dict(zip(names, row)) for row in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+
+def mark_ecourts_changes_alerted(change_ids: list[int]) -> None:
+    if not change_ids:
+        return
+    conn = _conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE ecourts_case_changes SET alerted_at=NOW()
+            WHERE id = ANY(%s)
+        """, ([int(item) for item in change_ids],))
+        conn.commit()
     finally:
         cur.close()
         conn.close()
