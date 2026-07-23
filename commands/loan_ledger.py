@@ -46,7 +46,8 @@ logger = logging.getLogger(__name__)
     WAIT_PRINCIPAL,
     WAIT_RATE,
     WAIT_LOAN_DATE,
-    WAIT_NEXT_DUE,
+    WAIT_DISBURSEMENT,
+    WAIT_FIRST_INTEREST,
     WAIT_MATURITY,
     WAIT_GUARANTOR,
     WAIT_SECURITY,
@@ -55,7 +56,7 @@ logger = logging.getLogger(__name__)
     WAIT_PAYMENT_AMOUNT,
     WAIT_PAYMENT_NOTE,
     WAIT_ADD_DOCUMENTS,
-) = range(14)
+) = range(15)
 
 
 def esc(value: object) -> str:
@@ -64,7 +65,21 @@ def esc(value: object) -> str:
 
 def money(value: object) -> str:
     try:
-        return f"₹{Decimal(value or 0):,.2f}"
+        amount = Decimal(value or 0).quantize(Decimal("0.01"))
+        sign = "-" if amount < 0 else ""
+        whole, fraction = f"{abs(amount):.2f}".split(".")
+        if len(whole) > 3:
+            whole = whole[:-3]
+            groups = []
+            while len(whole) > 2:
+                groups.insert(0, whole[-2:])
+                whole = whole[:-2]
+            if whole:
+                groups.insert(0, whole)
+            grouped = ",".join(groups) + "," + f"{abs(amount):.2f}".split(".")[0][-3:]
+        else:
+            grouped = whole
+        return f"₹{sign}{grouped}.{fraction}"
     except Exception:
         return f"₹{value or 0}"
 
@@ -103,6 +118,10 @@ def loan_keyboard(loan_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("💰 Interest Receipt", callback_data=f"loan:paytype:{loan_id}:INTEREST_RECEIVED"),
             InlineKeyboardButton("🏦 Principal Receipt", callback_data=f"loan:paytype:{loan_id}:PRINCIPAL_RECEIVED"),
         ],
+        [InlineKeyboardButton(
+            "🧾 Opening Interest Correction",
+            callback_data=f"loan:paytype:{loan_id}:OPENING_INTEREST_RECEIVED",
+        )],
         [InlineKeyboardButton("📄 Add Documents", callback_data=f"loan:documents:{loan_id}")],
         [InlineKeyboardButton("⬅️ Loan Accounts", callback_data="loan:list")],
     ])
@@ -344,24 +363,50 @@ async def loan_date_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return WAIT_LOAN_DATE
     context.user_data["loan_entry"]["loan_date"] = value
     await update.effective_message.reply_text(
-        "Enter the next advance-interest due date in DD-MM-YYYY.\n"
-        "Use the loan date when the first month’s interest is payable immediately."
+        "Enter disbursement details as:\n"
+        "<code>MODE | REFERENCE</code>\n\n"
+        "Modes: CASH, BANK, UPI, CHEQUE or OTHER.\n"
+        "Example: <code>BANK | UTR 123456</code>"
+        "\nType <code>skip</code> if not recorded.",
+        parse_mode=ParseMode.HTML,
     )
-    return WAIT_NEXT_DUE
+    return WAIT_DISBURSEMENT
 
 
-async def next_due_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        value = parse_date(update.effective_message.text or "")
-    except ValueError as exc:
-        await update.effective_message.reply_text(f"❌ {exc}")
-        return WAIT_NEXT_DUE
-    if value < context.user_data["loan_entry"]["loan_date"]:
+async def disbursement_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.effective_message.text or "").strip()
+    item = context.user_data["loan_entry"]
+    if text.casefold() == "skip":
+        item["disbursement_mode"] = "NOT_RECORDED"
+        item["disbursement_reference"] = None
+    else:
+        parts = [part.strip() for part in text.split("|", 1)]
+        mode = parts[0].upper()
+        if mode not in {"CASH", "BANK", "UPI", "CHEQUE", "OTHER"}:
+            await update.effective_message.reply_text(
+                "❌ Use CASH, BANK, UPI, CHEQUE or OTHER, followed by | reference."
+            )
+            return WAIT_DISBURSEMENT
+        item["disbursement_mode"] = mode
+        item["disbursement_reference"] = parts[1] if len(parts) > 1 else None
+    await update.effective_message.reply_text(
+        "Was the first month’s advance interest collected at disbursement?\n"
+        "Reply <code>yes</code> or <code>no</code>.\n\n"
+        "The next interest due date will be calculated automatically.",
+        parse_mode=ParseMode.HTML,
+    )
+    return WAIT_FIRST_INTEREST
+
+
+async def first_interest_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.effective_message.text or "").strip().casefold()
+    if text not in {"yes", "y", "no", "n"}:
         await update.effective_message.reply_text(
-            "❌ The first interest due date cannot be before the loan date."
+            "Reply <code>yes</code> if collected, or <code>no</code> if still due.",
+            parse_mode=ParseMode.HTML,
         )
-        return WAIT_NEXT_DUE
-    context.user_data["loan_entry"]["next_due_date"] = value
+        return WAIT_FIRST_INTEREST
+    context.user_data["loan_entry"]["first_interest_collected"] = text in {"yes", "y"}
     await update.effective_message.reply_text(
         "Enter maturity date in DD-MM-YYYY, or type <code>open</code> for no fixed maturity:",
         parse_mode=ParseMode.HTML,
@@ -444,7 +489,9 @@ async def notes_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
             principal=item["principal"],
             monthly_rate=item["monthly_rate"],
             loan_date=item["loan_date"],
-            next_due_date=item["next_due_date"],
+            disbursement_mode=item.get("disbursement_mode", "NOT_RECORDED"),
+            disbursement_reference=item.get("disbursement_reference"),
+            first_interest_collected=bool(item.get("first_interest_collected")),
             maturity_date=item.get("maturity_date"),
             guarantor_name=item.get("guarantor_name"),
             guarantor_phone=item.get("guarantor_phone"),
@@ -633,7 +680,8 @@ def build_loan_ledger_handler() -> ConversationHandler:
             WAIT_PRINCIPAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, principal_received)],
             WAIT_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, rate_received)],
             WAIT_LOAN_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, loan_date_received)],
-            WAIT_NEXT_DUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, next_due_received)],
+            WAIT_DISBURSEMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, disbursement_received)],
+            WAIT_FIRST_INTEREST: [MessageHandler(filters.TEXT & ~filters.COMMAND, first_interest_received)],
             WAIT_MATURITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, maturity_received)],
             WAIT_GUARANTOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, guarantor_received)],
             WAIT_SECURITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, security_received)],
