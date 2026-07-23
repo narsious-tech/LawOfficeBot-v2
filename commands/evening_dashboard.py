@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from advocate_web import AdvocateWeb
@@ -180,6 +181,18 @@ def _assigned_list_text(cases, selected, target, assigned_by):
     return "\n".join(lines).strip()
 
 
+async def _safe_edit_selection(query, state, target, page):
+    """Refresh a selector without treating a repeated no-op tap as a failure."""
+    try:
+        await query.edit_message_text(
+            _selection_text(state, target, page),
+            reply_markup=_selection_keyboard(state, target, page),
+        )
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+
+
 async def _official_pdf(target):
     pdf_bytes = await asyncio.to_thread(AdvocateWeb().download_day_cases_pdf, target.isoformat())
     path = os.path.join(tempfile.gettempdir(), f"Case-{target.isoformat()}.pdf")
@@ -236,32 +249,32 @@ async def evening_file_selection_callback(update: Update, context: ContextTypes.
             selected.remove(idx)
         else:
             selected.add(idx)
-        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        await _safe_edit_selection(query, state, target, page)
         return
 
     if action == "p":
         page = int(parts[3])
-        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        await _safe_edit_selection(query, state, target, page)
         return
 
     if action == "auto":
         page = int(parts[3])
         _apply_auto_selection(state)
-        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        await _safe_edit_selection(query, state, target, page)
         return
 
     if action == "all":
         page = int(parts[3])
         selected.clear(); selected.update(range(len(cases)))
         state["auto_selected"] = set()
-        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        await _safe_edit_selection(query, state, target, page)
         return
 
     if action == "clear":
         page = int(parts[3])
         selected.clear()
         state["auto_selected"] = set()
-        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        await _safe_edit_selection(query, state, target, page)
         return
 
     if action == "send":
@@ -300,7 +313,7 @@ async def evening_file_selection_callback(update: Update, context: ContextTypes.
         if missing:
             confirmation += f"\n⚠️ Telegram account not linked/reachable: {', '.join(missing)}."
         await context.bot.send_message(chat_id=query.message.chat.id, text=confirmation)
-        await query.edit_message_text(_selection_text(state, target, page), reply_markup=_selection_keyboard(state, target, page))
+        await _safe_edit_selection(query, state, target, page)
         return
 
 
