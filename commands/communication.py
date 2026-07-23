@@ -1,3 +1,4 @@
+import asyncio
 import urllib.parse
 
 import psycopg2
@@ -22,6 +23,7 @@ from services.client_timeline import (
     log_communication_event,
     log_verification_event,
 )
+from services.whatsapp_cloud import send_logged_client_message, transport_ready
 
 from services.communication_service import (
     get_db_connection,
@@ -292,13 +294,16 @@ async def prepare_client_message(
         "Review the message before opening WhatsApp."
     )
 
-    keyboard = InlineKeyboardMarkup([
-        [
+    keyboard_rows = []
+    if transport_ready():
+        keyboard_rows.append([
             InlineKeyboardButton(
-                "📲 Open WhatsApp",
-                url=whatsapp_url
+                "🚀 Send Automatically",
+                callback_data=f"comm:api:{message_id}"
             )
-        ],
+        ])
+    keyboard_rows.extend([
+        [InlineKeyboardButton("📲 Open WhatsApp", url=whatsapp_url)],
         [
             InlineKeyboardButton(
                 "✅ Mark Sent",
@@ -312,8 +317,9 @@ async def prepare_client_message(
                     f"comm:cancel:{message_id}"
                 )
             )
-        ]
+        ],
     ])
+    keyboard = InlineKeyboardMarkup(keyboard_rows)
 
     await update.effective_message.reply_text(
         preview,
@@ -628,6 +634,26 @@ async def communication_callback(
     message_id = int(
         message_id_text
     )
+
+    if action == "api":
+        try:
+            result = await asyncio.to_thread(
+                send_logged_client_message, message_id
+            )
+            await query.edit_message_text(
+                "✅ WHATSAPP MESSAGE SUBMITTED AUTOMATICALLY\n\n"
+                f"🆔 Message ID: {message_id}\n"
+                f"📡 Provider ID: {result['provider_message_id']}\n\n"
+                "Delivery and read status will update through the webhook."
+            )
+        except Exception as exc:
+            await query.edit_message_text(
+                "❌ AUTOMATIC WHATSAPP SEND FAILED\n\n"
+                f"{exc}\n\n"
+                "The draft is retained as FAILED and can be retried after "
+                "the configuration is corrected."
+            )
+        return
 
     status = {
         "sent": "SENT_MANUALLY",
