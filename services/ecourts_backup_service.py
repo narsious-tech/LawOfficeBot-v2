@@ -211,6 +211,61 @@ def _date(value: Any) -> str | None:
     return text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else None
 
 
+def inspect_backup_record(cino: str) -> dict[str, Any]:
+    """Return a safe inventory of fields present in one imported app backup row."""
+    ensure_ecourts_schema()
+    normalized = re.sub(r"[^A-Za-z0-9]", "", str(cino or "")).upper()
+    if not re.fullmatch(r"[A-Z0-9]{16}", normalized):
+        raise ValueError("Enter the exact 16-character CNR.")
+
+    conn = _conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT source_kind, display_case_number, raw_payload
+            FROM ecourts_backup_records
+            WHERE cino=%s
+            """,
+            (normalized,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(
+                "CNR was not found in the latest imported backup. "
+                "Run /syncecourts first."
+            )
+        payload = row[2] if isinstance(row[2], dict) else {}
+        populated = sorted(
+            str(key)
+            for key, value in payload.items()
+            if value not in (None, "", [], {})
+        )
+        order_tokens = (
+            "order", "judgment", "interim", "document", "pdf", "download",
+            "proceeding", "history", "hearing",
+        )
+        reference_tokens = ("url", "uri", "link", "path", "file", "id")
+        return {
+            "cino": normalized,
+            "source_kind": row[0],
+            "display_case_number": row[1],
+            "field_count": len(payload),
+            "populated_fields": populated,
+            "order_fields": sorted(
+                key for key in populated
+                if any(token in key.lower() for token in order_tokens)
+            ),
+            "reference_fields": sorted(
+                key for key in populated
+                if any(token in key.lower() for token in reference_tokens)
+            ),
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
 def normalize_case_number(value: Any) -> str:
     text = str(value or "").upper().replace("CASE", "")
     parts = [part for part in re.split(r"[^A-Z0-9]+", text) if part]
