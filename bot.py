@@ -187,6 +187,7 @@ from commands.mobile_audit import (
 
 from commands.finance_ledger import register_ledger_handlers
 from commands.loan_ledger import register_loan_ledger_handlers, loan_interest_reminder_job
+from commands.whatsapp_admin import register_whatsapp_handlers, whatsapp_retry_job
 from commands.mobile_update_queue import (
     mobileupdatequeue,
     mobileupdatequeuesummary,
@@ -4004,6 +4005,16 @@ register_ledger_handlers(app)
 
 # Sprint 23 administrator-only private loan ledger
 register_loan_ledger_handlers(app)
+
+# WhatsApp Cloud API transport, inbox and diagnostics
+register_whatsapp_handlers(app)
+
+app.job_queue.run_repeating(
+    whatsapp_retry_job,
+    interval=600,
+    first=90,
+    name="whatsapp_cloud_retry_queue",
+)
 
 app.job_queue.run_repeating(
     monitor_attendance_job,

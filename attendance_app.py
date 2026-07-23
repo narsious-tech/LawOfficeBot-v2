@@ -14,6 +14,11 @@ import psycopg2
 
 from config import DATABASE_URL
 from advocate_web import AdvocateWeb
+from services.whatsapp_cloud import (
+    process_webhook as process_whatsapp_webhook,
+    verify_challenge as verify_whatsapp_challenge,
+    verify_signature as verify_whatsapp_signature,
+)
 
 
 attendance_app = Flask(
@@ -28,6 +33,56 @@ def health():
 @attendance_app.get("/")
 def attendance_root():
     return redirect("/attendance-app", code=302)
+
+
+def _notify_whatsapp_inbound(item):
+    destination = OFFICE_GROUP_CHAT_ID or ADMIN_CHAT_ID
+    if not BOT_TOKEN or not destination:
+        return
+    text = (
+        "📨 NEW CLIENT WHATSAPP\n\n"
+        f"👤 {item.get('name') or 'Unknown contact'}\n"
+        f"📱 +{item.get('phone') or '-'}\n"
+        f"🔢 Case: {item.get('case_id') or 'Not matched'}\n"
+        f"💬 {item.get('text') or '-'}\n\n"
+        "Open /whatsappinbox in the bot to review."
+    )
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json={"chat_id": destination, "text": text},
+        timeout=15,
+    )
+
+
+@attendance_app.get("/whatsapp/webhook")
+def whatsapp_webhook_verify():
+    challenge = verify_whatsapp_challenge(
+        request.args.get("hub.mode", ""),
+        request.args.get("hub.verify_token", ""),
+        request.args.get("hub.challenge", ""),
+    )
+    return (challenge, 200) if challenge is not None else ("Forbidden", 403)
+
+
+@attendance_app.post("/whatsapp/webhook")
+def whatsapp_webhook_receive():
+    raw = request.get_data(cache=True)
+    if not verify_whatsapp_signature(
+        raw, request.headers.get("X-Hub-Signature-256")
+    ):
+        return jsonify({"status": "invalid signature"}), 403
+    payload = request.get_json(silent=True) or {}
+    try:
+        alerts = process_whatsapp_webhook(payload)
+        for item in alerts:
+            try:
+                _notify_whatsapp_inbound(item)
+            except Exception:
+                attendance_app.logger.exception("WhatsApp Telegram alert failed")
+        return jsonify({"status": "ok", "new_messages": len(alerts)}), 200
+    except Exception:
+        attendance_app.logger.exception("WhatsApp webhook processing failed")
+        return jsonify({"status": "processing error"}), 500
 
 BOT_TOKEN = os.getenv("TOKEN") or os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
