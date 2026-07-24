@@ -110,6 +110,17 @@ def ensure_ecourts_schema() -> None:
             )
         """)
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS ecourts_match_rejections (
+                id BIGSERIAL PRIMARY KEY,
+                local_case_pk TEXT NOT NULL,
+                cino TEXT NOT NULL,
+                rejected_by BIGINT,
+                rejected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                reason TEXT,
+                UNIQUE(local_case_pk, cino)
+            )
+        """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS ecourts_case_changes (
                 id BIGSERIAL PRIMARY KEY,
                 sync_run_id BIGINT REFERENCES ecourts_backup_sync_runs(id),
@@ -374,6 +385,62 @@ def _party_score(local: dict[str, Any], backup: dict[str, Any]) -> float:
     return SequenceMatcher(None, local_title, backup_title).ratio()
 
 
+def _case_parts(value: Any) -> tuple[str | None, int | None, int | None]:
+    text = str(value or "").strip().upper()
+    tokens = [item for item in re.split(r"[^A-Z0-9]+", text) if item]
+    case_type = next((item for item in tokens if re.fullmatch(r"[A-Z()]+", item)), None)
+    numbers = [int(item) for item in tokens if item.isdigit()]
+    if not numbers:
+        return case_type, None, None
+    year = numbers[-1]
+    if year < 100:
+        year += 2000
+    registration = numbers[-2] if len(numbers) >= 2 else None
+    return case_type, registration, year
+
+
+def _possible_assessment(
+    local: dict[str, Any],
+    backup: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return a conservative manual-match assessment, never an auto-link."""
+    local_type, local_number, local_year = _case_parts(local.get("_number"))
+    backup_type, backup_number, backup_year = _case_parts(
+        backup.get("display_case_number")
+    )
+    party = _party_score(local, backup)
+    type_match = bool(local_type and backup_type and local_type == backup_type)
+    year_match = bool(local_year and backup_year and local_year == backup_year)
+    number_match = bool(
+        local_number is not None
+        and backup_number is not None
+        and local_number == backup_number
+    )
+    # Exact type/number/year is handled by the auto-link branch. A manual
+    # suggestion must still agree on type and year and have strong party overlap.
+    if not type_match or not year_match or party < 0.82:
+        return None
+    confidence = min(
+        0.97,
+        (party * 0.70) + (0.15 if type_match else 0)
+        + (0.10 if year_match else 0) + (0.05 if number_match else 0),
+    )
+    return {
+        "confidence": confidence,
+        "match_strength": "STRONG" if party >= 0.92 else "VERIFY",
+        "party_score": party,
+        "type_match": type_match,
+        "year_match": year_match,
+        "number_match": number_match,
+        "reasons": [
+            f"Case type: {'match' if type_match else 'different'}",
+            f"Registration year: {'match' if year_match else 'different'}",
+            f"Registration number: {'match' if number_match else 'different'}",
+            f"Party similarity: {party:.0%}",
+        ],
+    }
+
+
 def _reconcile(
     cur,
     run_id: int,
@@ -404,6 +471,9 @@ def _reconcile(
     matched_cino: set[str] = set(approved_cino)
     possible: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
+    cur.execute("SELECT local_case_pk, cino FROM ecourts_match_rejections")
+    rejected_pairs = {(str(row[0]), str(row[1])) for row in cur.fetchall()}
+    provisional_possible: list[dict[str, Any]] = []
 
     for local in locals_:
         if local["_pk"] in matched_local:
@@ -423,19 +493,39 @@ def _reconcile(
         else:
             scored = sorted(
                 (
-                    (_party_score(local, record), record)
+                    (assessment, record)
                     for record in backups
                     if record["cino"] not in matched_cino
+                    and (local["_pk"], record["cino"]) not in rejected_pairs
+                    if (assessment := _possible_assessment(local, record)) is not None
                 ),
-                key=lambda pair: pair[0],
+                key=lambda pair: pair[0]["confidence"],
                 reverse=True,
             )
-            if scored and scored[0][0] >= 0.72:
-                possible.append({
+            if scored:
+                assessment, record = scored[0]
+                provisional_possible.append({
                     "local": local,
-                    "backup": scored[0][1],
-                    "confidence": scored[0][0],
+                    "backup": record,
+                    **assessment,
                 })
+
+    by_suggested_cino: dict[str, list[dict[str, Any]]] = {}
+    for item in provisional_possible:
+        by_suggested_cino.setdefault(item["backup"]["cino"], []).append(item)
+    for cino, items in by_suggested_cino.items():
+        if len(items) == 1:
+            possible.append(items[0])
+            continue
+        for item in items:
+            conflicts.append({
+                "local": item["local"],
+                "backup": item["backup"],
+                "reason": (
+                    f"Unsafe suggestion suppressed: CNR {cino} was the best "
+                    f"candidate for {len(items)} Office OS cases"
+                ),
+            })
 
     if auto_links and apply_auto_links:
         execute_values(cur, """
@@ -975,6 +1065,65 @@ def approve_link(local_case_pk: str, cino: str, actor_id: int) -> None:
                 (action, local_case_pk, cino, details, actor_id)
             VALUES ('ADMIN_APPROVE',%s,%s,%s,%s)
         """, (str(local_case_pk), cino.upper(), Json({"case_number": local["_number"]}), actor_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def reject_match(
+    local_case_pk: str,
+    cino: str,
+    actor_id: int,
+    reason: str = "Not the same case",
+) -> None:
+    """Permanently suppress one unsafe local/CNR suggestion pair."""
+    ensure_ecourts_schema()
+    normalized_cino = re.sub(r"[^A-Za-z0-9]", "", str(cino or "")).upper()
+    if not re.fullmatch(r"[A-Z0-9]{16}", normalized_cino):
+        raise ValueError("Invalid CNR.")
+    conn = _conn()
+    cur = conn.cursor()
+    try:
+        local = next(
+            (
+                item for item in _local_cases(cur)
+                if item["_pk"] == str(local_case_pk)
+            ),
+            None,
+        )
+        if not local:
+            raise ValueError("Office OS case was not found.")
+        cur.execute(
+            "SELECT 1 FROM ecourts_backup_records WHERE cino=%s",
+            (normalized_cino,),
+        )
+        if not cur.fetchone():
+            raise ValueError("eCourts backup CNR was not found.")
+        cur.execute("""
+            INSERT INTO ecourts_match_rejections (
+                local_case_pk, cino, rejected_by, reason
+            ) VALUES (%s,%s,%s,%s)
+            ON CONFLICT (local_case_pk, cino) DO UPDATE SET
+                rejected_by=EXCLUDED.rejected_by,
+                rejected_at=NOW(),
+                reason=EXCLUDED.reason
+        """, (
+            str(local_case_pk), normalized_cino, int(actor_id), str(reason)[:500],
+        ))
+        cur.execute("""
+            INSERT INTO ecourts_reconciliation_audit (
+                action, local_case_pk, cino, details, actor_id
+            ) VALUES ('MATCH_REJECT',%s,%s,%s,%s)
+        """, (
+            str(local_case_pk),
+            normalized_cino,
+            Json({"case_number": local["_number"], "reason": str(reason)[:500]}),
+            int(actor_id),
+        ))
         conn.commit()
     except Exception:
         conn.rollback()
