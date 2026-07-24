@@ -126,6 +126,26 @@ def ensure_ecourts_schema() -> None:
             )
         """)
         cur.execute("""
+            ALTER TABLE ecourts_case_changes
+            ADD COLUMN IF NOT EXISTS review_status TEXT NOT NULL DEFAULT 'PENDING'
+        """)
+        cur.execute("""
+            ALTER TABLE ecourts_case_changes
+            ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ
+        """)
+        cur.execute("""
+            ALTER TABLE ecourts_case_changes
+            ADD COLUMN IF NOT EXISTS reviewed_by BIGINT
+        """)
+        cur.execute("""
+            ALTER TABLE ecourts_case_changes
+            ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ
+        """)
+        cur.execute("""
+            ALTER TABLE ecourts_case_changes
+            ADD COLUMN IF NOT EXISTS apply_message TEXT
+        """)
+        cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_ecourts_backup_case_number
             ON ecourts_backup_records(display_case_number)
         """)
@@ -136,6 +156,10 @@ def ensure_ecourts_schema() -> None:
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_ecourts_changes_detected
             ON ecourts_case_changes(detected_at DESC)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ecourts_changes_review
+            ON ecourts_case_changes(review_status, severity, id DESC)
         """)
         cur.execute("ALTER TABLE cases ADD COLUMN IF NOT EXISTS ecourts_cnr TEXT")
         cur.execute(
@@ -661,24 +685,220 @@ def synchronize_backups(actor_id: int | None = None) -> dict[str, Any]:
         conn.close()
 
 
-def list_ecourts_changes(limit: int = 50, only_unalerted: bool = False) -> list[dict[str, Any]]:
+def list_ecourts_changes(
+    limit: int = 50,
+    only_unalerted: bool = False,
+    review_status: str | None = None,
+) -> list[dict[str, Any]]:
     ensure_ecourts_schema()
     conn = _conn()
     cur = conn.cursor()
     try:
-        where = "WHERE ch.alerted_at IS NULL" if only_unalerted else ""
+        clauses = []
+        params: list[Any] = []
+        if only_unalerted:
+            clauses.append("ch.alerted_at IS NULL")
+        if review_status:
+            clauses.append("ch.review_status=%s")
+            params.append(str(review_status).upper())
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         cur.execute(f"""
             SELECT ch.id, ch.cino, ch.display_case_number, ch.field_name,
                    ch.old_value, ch.new_value, ch.severity, ch.detected_at,
-                   ch.alerted_at, c.case_title, c.client_name
+                   ch.alerted_at, c.case_title, c.client_name,
+                   ch.review_status, ch.reviewed_at, ch.reviewed_by,
+                   ch.applied_at, ch.apply_message, ch.local_case_pk
             FROM ecourts_case_changes ch
             LEFT JOIN cases c ON c.id::text=ch.local_case_pk
             {where}
             ORDER BY ch.id DESC
             LIMIT %s
-        """, (max(1, min(int(limit), 200)),))
+        """, (*params, max(1, min(int(limit), 200))))
         names = [item[0] for item in cur.description]
         return [dict(zip(names, row)) for row in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _case_columns(cur) -> set[str]:
+    cur.execute("""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema=current_schema() AND table_name='cases'
+    """)
+    return {str(row[0]) for row in cur.fetchall()}
+
+
+def review_ecourts_change(
+    change_id: int,
+    decision: str,
+    actor_id: int,
+) -> dict[str, Any]:
+    """Approve/reject one detected change. No change is applied without this call."""
+    decision = str(decision or "").strip().upper()
+    if decision not in {"APPROVE", "REJECT"}:
+        raise ValueError("Decision must be APPROVE or REJECT.")
+    ensure_ecourts_schema()
+    conn = _conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, cino, local_case_pk, display_case_number, field_name,
+                   old_value, new_value, severity, review_status
+            FROM ecourts_case_changes
+            WHERE id=%s
+            FOR UPDATE
+        """, (int(change_id),))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError("eCourts change was not found.")
+        names = [column.name for column in cur.description]
+        item = dict(zip(names, row))
+        if item["review_status"] != "PENDING":
+            raise ValueError(
+                f"This change is already {str(item['review_status']).lower()}."
+            )
+        if decision == "REJECT":
+            message = "Rejected by administrator; Office OS was not changed."
+            cur.execute("""
+                UPDATE ecourts_case_changes
+                SET review_status='REJECTED', reviewed_at=NOW(),
+                    reviewed_by=%s, apply_message=%s
+                WHERE id=%s
+            """, (int(actor_id), message, int(change_id)))
+        else:
+            local_pk = item.get("local_case_pk")
+            if not local_pk:
+                raise ValueError("This eCourts record is not linked to an Office OS case.")
+            columns = _case_columns(cur)
+            candidates = {
+                "next_hearing_date": ("next_hearing", "hearing_date"),
+                "purpose_name": ("next_purpose",),
+                "disposal_name": ("status",),
+            }.get(item["field_name"], ())
+            target = next((name for name in candidates if name in columns), None)
+            if not target:
+                message = (
+                    "Approved for record, but this field has no safe Office OS mapping; "
+                    "no local value was changed."
+                )
+                status = "APPROVED_NO_MAPPING"
+                applied_at = None
+            else:
+                # target is selected only from the fixed whitelist above.
+                cur.execute(
+                    f"UPDATE cases SET {target}=%s, ecourts_last_synced_at=NOW() "
+                    "WHERE id::text=%s",
+                    (item.get("new_value"), str(local_pk)),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("Linked Office OS case could not be updated.")
+                message = f"Applied to cases.{target} after administrator approval."
+                status = "APPLIED"
+                applied_at = "NOW()"
+            cur.execute(f"""
+                UPDATE ecourts_case_changes
+                SET review_status=%s, reviewed_at=NOW(), reviewed_by=%s,
+                    applied_at={applied_at or 'NULL'}, apply_message=%s
+                WHERE id=%s
+            """, (status, int(actor_id), message, int(change_id)))
+        cur.execute("""
+            INSERT INTO ecourts_reconciliation_audit (
+                action, local_case_pk, cino, details, actor_id
+            ) VALUES (%s,%s,%s,%s,%s)
+        """, (
+            f"CHANGE_{decision}",
+            item.get("local_case_pk"),
+            item.get("cino"),
+            Json({
+                "change_id": int(change_id),
+                "field_name": item.get("field_name"),
+                "old_value": item.get("old_value"),
+                "new_value": item.get("new_value"),
+                "result": message,
+            }),
+            int(actor_id),
+        ))
+        conn.commit()
+        item.update({"review_status": status if decision == "APPROVE" else "REJECTED"})
+        item["apply_message"] = message
+        return item
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def ecourts_operations_summary() -> dict[str, Any]:
+    ensure_ecourts_schema()
+    conn = _conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE review_status='PENDING'),
+                COUNT(*) FILTER (
+                    WHERE review_status='PENDING' AND severity='CRITICAL'
+                ),
+                COUNT(*) FILTER (
+                    WHERE review_status='PENDING' AND severity='IMPORTANT'
+                )
+            FROM ecourts_case_changes
+        """)
+        pending, critical, important = cur.fetchone()
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM cases
+            WHERE COALESCE(status, 'OPEN') NOT IN ('CLOSED','DISPOSED')
+              AND NULLIF(BTRIM(COALESCE(ecourts_cnr, '')), '') IS NULL
+        """)
+        missing_cnr = cur.fetchone()[0]
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM ecourts_case_links
+            WHERE link_status='APPROVED'
+        """)
+        linked = cur.fetchone()[0]
+        order_counts = {"unmatched": 0, "failed": 0, "important": 0}
+        cur.execute("SELECT to_regclass('ecourts_order_inbox')")
+        if cur.fetchone()[0]:
+            cur.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE processing_status='UNMATCHED'),
+                    COUNT(*) FILTER (WHERE processing_status='FAILED'),
+                    COUNT(*) FILTER (
+                        WHERE importance IN ('IMPORTANT','CRITICAL')
+                          AND processing_status<>'DUPLICATE'
+                    )
+                FROM ecourts_order_inbox
+            """)
+            unmatched, failed, important_orders = cur.fetchone()
+            order_counts = {
+                "unmatched": unmatched,
+                "failed": failed,
+                "important": important_orders,
+            }
+        cur.execute("""
+            SELECT finished_at, status
+            FROM ecourts_backup_sync_runs
+            ORDER BY id DESC LIMIT 1
+        """)
+        latest = cur.fetchone()
+        return {
+            "pending_changes": pending,
+            "critical_changes": critical,
+            "important_changes": important,
+            "missing_cnr": missing_cnr,
+            "linked_cases": linked,
+            "unmatched_orders": order_counts["unmatched"],
+            "failed_orders": order_counts["failed"],
+            "important_orders": order_counts["important"],
+            "last_sync_at": latest[0] if latest else None,
+            "last_sync_status": latest[1] if latest else "NOT_RUN",
+        }
     finally:
         cur.close()
         conn.close()
