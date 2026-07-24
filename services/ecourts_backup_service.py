@@ -172,6 +172,22 @@ def ensure_ecourts_schema() -> None:
             CREATE INDEX IF NOT EXISTS idx_ecourts_changes_review
             ON ecourts_case_changes(review_status, severity, id DESC)
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ecourts_preparation_queue (
+                id BIGSERIAL PRIMARY KEY,
+                local_case_pk TEXT NOT NULL,
+                cino TEXT NOT NULL,
+                source_sync_run_id BIGINT,
+                source_change_ids BIGINT[] NOT NULL DEFAULT '{}',
+                next_hearing_date DATE,
+                purpose_name TEXT,
+                order_status TEXT NOT NULL DEFAULT 'AWAITING_PDF',
+                queue_status TEXT NOT NULL DEFAULT 'READY_FOR_REVIEW',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                reviewed_at TIMESTAMPTZ,
+                UNIQUE(local_case_pk, cino, source_sync_run_id)
+            )
+        """)
         cur.execute("ALTER TABLE cases ADD COLUMN IF NOT EXISTS ecourts_cnr TEXT")
         cur.execute(
             "ALTER TABLE cases ADD COLUMN IF NOT EXISTS ecourts_last_synced_at TIMESTAMPTZ"
@@ -793,7 +809,7 @@ def list_ecourts_changes(
             params.append(str(review_status).upper())
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         cur.execute(f"""
-            SELECT ch.id, ch.cino, ch.display_case_number, ch.field_name,
+            SELECT ch.id, ch.sync_run_id, ch.cino, ch.display_case_number, ch.field_name,
                    ch.old_value, ch.new_value, ch.severity, ch.detected_at,
                    ch.alerted_at, c.case_title, c.client_name,
                    ch.review_status, ch.reviewed_at, ch.reviewed_by,
@@ -806,6 +822,78 @@ def list_ecourts_changes(
         """, (*params, max(1, min(int(limit), 200))))
         names = [item[0] for item in cur.description]
         return [dict(zip(names, row)) for row in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+
+def list_ecourts_change_groups(
+    limit: int = 25,
+    review_status: str = "PENDING",
+    only_unalerted: bool = False,
+) -> list[dict[str, Any]]:
+    """Return one administrator-review item per case and synchronization run."""
+    ensure_ecourts_schema()
+    conn = _conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT ch.sync_run_id, ch.cino, ch.local_case_pk,
+                   MAX(ch.display_case_number) AS display_case_number,
+                   MAX(c.case_title) AS case_title,
+                   MAX(c.client_name) AS client_name,
+                   MAX(ch.detected_at) AS detected_at,
+                   ARRAY_AGG(ch.id ORDER BY ch.id) AS change_ids,
+                   JSONB_AGG(
+                       JSONB_BUILD_OBJECT(
+                           'id', ch.id,
+                           'field_name', ch.field_name,
+                           'old_value', ch.old_value,
+                           'new_value', ch.new_value,
+                           'severity', ch.severity
+                       ) ORDER BY ch.id
+                   ) AS changes,
+                   CASE
+                       WHEN BOOL_OR(ch.severity='CRITICAL') THEN 'CRITICAL'
+                       WHEN BOOL_OR(ch.severity='IMPORTANT') THEN 'IMPORTANT'
+                       ELSE 'INFO'
+                   END AS severity
+            FROM ecourts_case_changes ch
+            LEFT JOIN cases c ON c.id::text=ch.local_case_pk
+            WHERE ch.review_status=%s
+              AND (%s=FALSE OR ch.alerted_at IS NULL)
+            GROUP BY ch.sync_run_id, ch.cino, ch.local_case_pk
+            ORDER BY MAX(ch.id) DESC
+            LIMIT %s
+        """, (
+            str(review_status).upper(),
+            bool(only_unalerted),
+            max(1, min(int(limit), 100)),
+        ))
+        names = [item[0] for item in cur.description]
+        groups = [dict(zip(names, row)) for row in cur.fetchall()]
+
+        order_table_exists = False
+        cur.execute("SELECT to_regclass('ecourts_order_inbox')")
+        order_table_exists = bool(cur.fetchone()[0])
+        for group in groups:
+            group["order_status"] = "AWAITING_PDF"
+            group["order_drive_link"] = None
+            if not order_table_exists:
+                continue
+            cur.execute("""
+                SELECT processing_status,
+                       COALESCE(archived_drive_link, original_link)
+                FROM ecourts_order_inbox
+                WHERE cino=%s OR local_case_pk=%s
+                ORDER BY id DESC
+                LIMIT 1
+            """, (group["cino"], group.get("local_case_pk")))
+            order_row = cur.fetchone()
+            if order_row:
+                group["order_status"] = order_row[0] or "FOUND"
+                group["order_drive_link"] = order_row[1]
+        return groups
     finally:
         cur.close()
         conn.close()
@@ -914,6 +1002,181 @@ def review_ecourts_change(
         item.update({"review_status": status if decision == "APPROVE" else "REJECTED"})
         item["apply_message"] = message
         return item
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def review_ecourts_change_group(
+    sync_run_id: int,
+    cino: str,
+    decision: str,
+    actor_id: int,
+) -> dict[str, Any]:
+    """Review every pending field for one case/run in a single local transaction."""
+    decision = str(decision or "").strip().upper()
+    if decision not in {"APPROVE", "REJECT"}:
+        raise ValueError("Decision must be APPROVE or REJECT.")
+    normalized_cino = str(cino or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{16}", normalized_cino):
+        raise ValueError("Invalid CNR.")
+    ensure_ecourts_schema()
+    conn = _conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, cino, local_case_pk, display_case_number, field_name,
+                   old_value, new_value, severity, review_status
+            FROM ecourts_case_changes
+            WHERE sync_run_id=%s AND cino=%s AND review_status='PENDING'
+            ORDER BY id
+            FOR UPDATE
+        """, (int(sync_run_id), normalized_cino))
+        names = [column.name for column in cur.description]
+        items = [dict(zip(names, row)) for row in cur.fetchall()]
+        if not items:
+            raise ValueError("No pending changes remain for this case.")
+        local_pks = {str(item.get("local_case_pk") or "") for item in items}
+        if len(local_pks) != 1 or "" in local_pks:
+            raise ValueError("The grouped changes do not have one valid Office OS case.")
+        local_pk = next(iter(local_pks))
+        change_ids = [int(item["id"]) for item in items]
+
+        if decision == "REJECT":
+            message = (
+                "All changes in this case update were rejected; "
+                "Office OS was not changed."
+            )
+            cur.execute("""
+                UPDATE ecourts_case_changes
+                SET review_status='REJECTED', reviewed_at=NOW(),
+                    reviewed_by=%s, apply_message=%s
+                WHERE id=ANY(%s)
+            """, (int(actor_id), message, change_ids))
+            applied_fields: list[str] = []
+            unmapped_fields: list[str] = []
+            group_status = "REJECTED"
+        else:
+            columns = _case_columns(cur)
+            mappings = {
+                "next_hearing_date": ("next_hearing", "hearing_date"),
+                "last_hearing_date": ("last_hearing_date", "last_hearing"),
+                "purpose_name": ("next_purpose",),
+                "disposal_name": ("status",),
+                "court_designation": ("court_name", "court"),
+            }
+            applied_fields = []
+            unmapped_fields = []
+            for item in items:
+                candidates = mappings.get(item["field_name"], ())
+                target = next((name for name in candidates if name in columns), None)
+                if not target:
+                    unmapped_fields.append(str(item["field_name"]))
+                    cur.execute("""
+                        UPDATE ecourts_case_changes
+                        SET review_status='APPROVED_NO_MAPPING',
+                            reviewed_at=NOW(), reviewed_by=%s,
+                            apply_message=%s
+                        WHERE id=%s
+                    """, (
+                        int(actor_id),
+                        "Approved for record; no safe Office OS column mapping exists.",
+                        int(item["id"]),
+                    ))
+                    continue
+                # The SQL identifier is selected only from the fixed whitelist above.
+                cur.execute(
+                    f"UPDATE cases SET {target}=%s, ecourts_last_synced_at=NOW() "
+                    "WHERE id::text=%s",
+                    (item.get("new_value"), local_pk),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("Linked Office OS case could not be updated.")
+                applied_fields.append(str(item["field_name"]))
+                cur.execute("""
+                    UPDATE ecourts_case_changes
+                    SET review_status='APPLIED', reviewed_at=NOW(),
+                        reviewed_by=%s, applied_at=NOW(), apply_message=%s
+                    WHERE id=%s
+                """, (
+                    int(actor_id),
+                    f"Applied safely to cases.{target} as part of grouped review.",
+                    int(item["id"]),
+                ))
+
+            values = {str(item["field_name"]): item.get("new_value") for item in items}
+            order_status = "AWAITING_PDF"
+            cur.execute("SELECT to_regclass('ecourts_order_inbox')")
+            if cur.fetchone()[0]:
+                cur.execute("""
+                    SELECT processing_status
+                    FROM ecourts_order_inbox
+                    WHERE cino=%s OR local_case_pk=%s
+                    ORDER BY id DESC LIMIT 1
+                """, (normalized_cino, local_pk))
+                order_row = cur.fetchone()
+                if order_row:
+                    order_status = order_row[0] or "FOUND"
+            cur.execute("""
+                INSERT INTO ecourts_preparation_queue (
+                    local_case_pk, cino, source_sync_run_id, source_change_ids,
+                    next_hearing_date, purpose_name, order_status
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (local_case_pk, cino, source_sync_run_id)
+                DO UPDATE SET
+                    source_change_ids=EXCLUDED.source_change_ids,
+                    next_hearing_date=EXCLUDED.next_hearing_date,
+                    purpose_name=EXCLUDED.purpose_name,
+                    order_status=EXCLUDED.order_status,
+                    queue_status='READY_FOR_REVIEW'
+            """, (
+                local_pk,
+                normalized_cino,
+                int(sync_run_id),
+                change_ids,
+                values.get("next_hearing_date"),
+                values.get("purpose_name"),
+                order_status,
+            ))
+            group_status = "APPLIED" if applied_fields else "APPROVED_NO_MAPPING"
+            message = (
+                f"Grouped review completed: {len(applied_fields)} field(s) applied, "
+                f"{len(unmapped_fields)} retained for record only. "
+                f"Preparation follow-up queued; order status: {order_status}."
+            )
+
+        cur.execute("""
+            INSERT INTO ecourts_reconciliation_audit (
+                action, local_case_pk, cino, details, actor_id
+            ) VALUES (%s,%s,%s,%s,%s)
+        """, (
+            f"CHANGE_GROUP_{decision}",
+            local_pk,
+            normalized_cino,
+            Json({
+                "sync_run_id": int(sync_run_id),
+                "change_ids": change_ids,
+                "applied_fields": applied_fields,
+                "unmapped_fields": unmapped_fields,
+                "result": message,
+            }),
+            int(actor_id),
+        ))
+        conn.commit()
+        return {
+            "sync_run_id": int(sync_run_id),
+            "cino": normalized_cino,
+            "local_case_pk": local_pk,
+            "display_case_number": items[0].get("display_case_number"),
+            "change_ids": change_ids,
+            "review_status": group_status,
+            "applied_fields": applied_fields,
+            "unmapped_fields": unmapped_fields,
+            "apply_message": message,
+        }
     except Exception:
         conn.rollback()
         raise
