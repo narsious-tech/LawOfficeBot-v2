@@ -15,11 +15,13 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 from services.ecourts_backup_service import (
     approve_link,
     create_reconciled_drive_export,
+    ecourts_operations_summary,
     ensure_ecourts_schema,
     inspect_backup_record,
     list_ecourts_changes,
     latest_reconciliation,
     mark_ecourts_changes_alerted,
+    review_ecourts_change,
     synchronize_backups,
 )
 from services.ecourts_order_service import (
@@ -76,6 +78,7 @@ async def _authorize(update: Update) -> bool:
 def _keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Synchronize Backups", callback_data="ecr:sync")],
+        [InlineKeyboardButton("🛡 Pending Change Review", callback_data="ecr:review")],
         [
             InlineKeyboardButton("🔴 Not Linked", callback_data="ecr:office:1"),
             InlineKeyboardButton("🔵 Backup Only", callback_data="ecr:backup"),
@@ -411,6 +414,89 @@ async def ecourtschanges(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _review_keyboard(item: dict) -> InlineKeyboardMarkup:
+    change_id = int(item["id"])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ Approve & Apply Safely",
+                callback_data=f"ecr:changeapprove:{change_id}",
+            ),
+            InlineKeyboardButton(
+                "❌ Reject",
+                callback_data=f"ecr:changereject:{change_id}",
+            ),
+        ],
+        [InlineKeyboardButton("⬅️ eCourts Dashboard", callback_data="ecr:home")],
+    ])
+
+
+def _operations_text(data: dict) -> str:
+    last_sync = data.get("last_sync_at")
+    last_sync_text = (
+        last_sync.strftime("%d-%m-%Y %I:%M %p")
+        if hasattr(last_sync, "strftime") else "Not yet"
+    )
+    return (
+        "⚖️ <b>eCOURTS OPERATIONS DESK</b>\n\n"
+        f"🔄 Last backup sync: <b>{html.escape(last_sync_text)}</b>\n"
+        f"Status: <b>{html.escape(str(data.get('last_sync_status') or '-'))}</b>\n\n"
+        "🛡 <b>ADMIN REVIEW QUEUE</b>\n"
+        f"🚨 Critical changes: <b>{int(data.get('critical_changes') or 0)}</b>\n"
+        f"⚠️ Important changes: <b>{int(data.get('important_changes') or 0)}</b>\n"
+        f"📋 Total pending: <b>{int(data.get('pending_changes') or 0)}</b>\n\n"
+        "🔗 <b>CASE LINK HEALTH</b>\n"
+        f"✅ Linked cases: <b>{int(data.get('linked_cases') or 0)}</b>\n"
+        f"🔴 Active cases without CNR: <b>{int(data.get('missing_cnr') or 0)}</b>\n\n"
+        "📄 <b>ORDER INBOX</b>\n"
+        f"⚠️ Important/critical orders: <b>{int(data.get('important_orders') or 0)}</b>\n"
+        f"🟠 Unmatched PDFs: <b>{int(data.get('unmatched_orders') or 0)}</b>\n"
+        f"❌ Failed PDFs: <b>{int(data.get('failed_orders') or 0)}</b>\n\n"
+        "Office OS values are changed only after your approval."
+    )
+
+
+async def _send_pending_change(message) -> None:
+    rows = await asyncio.to_thread(list_ecourts_changes, 1, False, "PENDING")
+    if not rows:
+        await message.reply_text(
+            "✅ No eCourts changes are waiting for administrator review."
+        )
+        return
+    item = rows[0]
+    await message.reply_text(
+        "🛡 <b>eCOURTS CHANGE — ADMIN DECISION</b>\n\n"
+        + _change_text(item)
+        + "\n\nApprove only after checking the CNR and case. Unsupported fields "
+        "are recorded as approved but are never forced into Office OS.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_review_keyboard(item),
+    )
+
+
+async def ecourtsreview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    await _send_pending_change(update.effective_message)
+
+
+async def ecourtsops(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    data = await asyncio.to_thread(ecourts_operations_summary)
+    await update.effective_message.reply_text(
+        _operations_text(data),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛡 Review Pending Changes", callback_data="ecr:review")],
+            [
+                InlineKeyboardButton("🔄 Sync Backups", callback_data="ecr:sync"),
+                InlineKeyboardButton("📥 Scan Orders", callback_data="ecr:orderscan"),
+            ],
+        ]),
+    )
+
+
 def _order_text(item: dict, include_summary: bool = False) -> str:
     processing_status = item.get("processing_status") or item.get("status")
     status_icons = {
@@ -549,6 +635,50 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _summary(data), parse_mode=ParseMode.HTML, reply_markup=_keyboard()
         )
         return
+    if action == "review":
+        await _send_pending_change(query.message)
+        return
+    if action in {"changeapprove", "changereject"}:
+        if len(parts) < 3 or not parts[2].isdigit():
+            await query.message.reply_text("❌ Invalid eCourts change reference.")
+            return
+        try:
+            result = await asyncio.to_thread(
+                review_ecourts_change,
+                int(parts[2]),
+                "APPROVE" if action == "changeapprove" else "REJECT",
+                update.effective_user.id,
+            )
+            await query.edit_message_text(
+                (
+                    "✅ <b>eCOURTS CHANGE REVIEWED</b>\n\n"
+                    f"Case: <b>{html.escape(str(result.get('display_case_number') or '-'))}</b>\n"
+                    f"Decision: <b>{html.escape(str(result.get('review_status') or '-'))}</b>\n"
+                    f"{html.escape(str(result.get('apply_message') or 'Recorded.'))}"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            await _send_pending_change(query.message)
+        except Exception as exc:
+            await query.message.reply_text(
+                f"❌ Review could not be completed safely: {html.escape(str(exc))}",
+                parse_mode=ParseMode.HTML,
+            )
+        return
+    if action == "orderscan":
+        await query.message.reply_text("⏳ Scanning the eCourts Order Inbox…")
+        try:
+            result = await asyncio.to_thread(scan_order_inbox, 10, True)
+            await query.message.reply_text(
+                "✅ Order Inbox scan complete.\n"
+                f"PDFs present: {result['files_seen']}\n"
+                f"Processed/retried: {result['processed_count']}"
+            )
+        except Exception as exc:
+            await query.message.reply_text(
+                f"❌ Order scan failed safely: {type(exc).__name__}: {str(exc)[:700]}"
+            )
+        return
     if action == "report":
         data = await asyncio.to_thread(latest_reconciliation)
         content = _report_bytes(data)
@@ -640,6 +770,33 @@ async def ecourts_order_inbox_job(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Scheduled eCourts order inbox scan failed")
 
 
+async def ecourts_daily_operations_job(context: ContextTypes.DEFAULT_TYPE):
+    """Send a private read-only daily summary to configured administrators."""
+    try:
+        data = await asyncio.to_thread(ecourts_operations_summary)
+        for destination in _admin_destinations():
+            try:
+                await context.bot.send_message(
+                    chat_id=destination,
+                    text=_operations_text(data),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "🛡 Review Pending Changes",
+                            callback_data="ecr:review",
+                        )],
+                        [InlineKeyboardButton(
+                            "⚖️ Open eCourts Desk",
+                            callback_data="ecr:home",
+                        )],
+                    ]),
+                )
+            except Exception:
+                logger.exception("Could not deliver daily eCourts operations summary")
+    except Exception:
+        logger.exception("Daily eCourts operations summary failed")
+
+
 def register_ecourts_handlers(app) -> None:
     app.add_handler(CommandHandler("ecourts", ecourts))
     app.add_handler(CommandHandler("syncecourts", syncecourts))
@@ -648,6 +805,8 @@ def register_ecourts_handlers(app) -> None:
     app.add_handler(CommandHandler("ecourtsapprove", ecourtsapprove))
     app.add_handler(CommandHandler("ecourtsinspect", ecourtsinspect))
     app.add_handler(CommandHandler("ecourtschanges", ecourtschanges))
+    app.add_handler(CommandHandler("ecourtsreview", ecourtsreview))
+    app.add_handler(CommandHandler("ecourtsops", ecourtsops))
     app.add_handler(CommandHandler("ecourtsorders", ecourtsorders))
     app.add_handler(CommandHandler("syncecourtsorders", syncecourtsorders))
     app.add_handler(CallbackQueryHandler(ecourts_callback, pattern=r"^ecr:"))
