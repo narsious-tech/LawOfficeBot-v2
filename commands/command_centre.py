@@ -8,6 +8,7 @@ handler as a second line of defence.
 from __future__ import annotations
 
 import html
+import logging
 import os
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class MenuItem:
@@ -209,12 +211,19 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     del context
     if not update.effective_message:
         return
-    level, name = _user_level(update.effective_user.id if update.effective_user else None)
-    await update.effective_message.reply_text(
-        _home_text(level, name),
-        parse_mode=ParseMode.HTML,
-        reply_markup=_home_keyboard(level),
-    )
+    try:
+        level, name = _user_level(update.effective_user.id if update.effective_user else None)
+        await update.effective_message.reply_text(
+            _home_text(level, name),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_home_keyboard(level),
+        )
+    except Exception:
+        logger.exception("Unified command centre failed to open")
+        await update.effective_message.reply_text(
+            "⚠️ The unified menu could not be opened safely.\n"
+            "The earlier Office OS remains available through /office."
+        )
 
 
 async def command_directory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -367,6 +376,10 @@ async def command_centre_callback(update: Update, context: ContextTypes.DEFAULT_
 def register_command_centre(app) -> None:
     # Registered early so the modern /commands directory supersedes the legacy
     # static text handler without removing any legacy command.
-    app.add_handler(CommandHandler(["menu", "command"], menu_command), group=-20)
-    app.add_handler(CommandHandler(["commands", "help"], command_directory), group=-20)
+    # Use individual handlers for compatibility with every PTB 21.x command
+    # normalization path and to make handler registration visible in logs.
+    app.add_handler(CommandHandler("menu", menu_command), group=-20)
+    app.add_handler(CommandHandler("command", menu_command), group=-20)
+    app.add_handler(CommandHandler("commands", command_directory), group=-20)
+    app.add_handler(CommandHandler("help", command_directory), group=-20)
     app.add_handler(CallbackQueryHandler(command_centre_callback, pattern=r"^cc:"), group=-20)
