@@ -188,6 +188,7 @@ from commands.mobile_audit import (
 from commands.finance_ledger import register_ledger_handlers
 from commands.loan_ledger import register_loan_ledger_handlers, loan_interest_reminder_job
 from commands.whatsapp_admin import register_whatsapp_handlers, whatsapp_retry_job
+from commands.command_centre import register_command_centre
 from commands.ecourts_backup import (
     register_ecourts_handlers,
     ecourts_backup_sync_job,
@@ -3438,6 +3439,10 @@ except Exception as exc:
     )
 
 app = ApplicationBuilder().token(TOKEN).build()
+
+# Sprint 26 unified role-aware command centre.  It is registered before the
+# legacy /commands handler, while every existing command remains available.
+register_command_centre(app)
 
 # Register modular /start, /newcase and /findcase before legacy handlers.
 register_case_handlers(app)
