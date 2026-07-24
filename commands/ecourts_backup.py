@@ -32,6 +32,12 @@ from services.ecourts_order_service import (
     mark_orders_alerted,
     scan_order_inbox,
 )
+from services.ecourts_orchestration_service import (
+    generate_order_work_proposals,
+    list_work_proposals,
+    review_work_proposal,
+    sync_approved_case_to_ad,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +96,7 @@ def _keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🟠 Possible Matches", callback_data="ecr:possible"),
             InlineKeyboardButton("⚠️ Conflicts", callback_data="ecr:conflicts"),
         ],
+        [InlineKeyboardButton("🤖 AI Work Proposals", callback_data="ecr:workqueue")],
         [InlineKeyboardButton("📊 Download Full Report", callback_data="ecr:report")],
         [InlineKeyboardButton("📤 Create Reconciled Copy", callback_data="ecr:export")],
         [InlineKeyboardButton("❌ Close", callback_data="ecr:close")],
@@ -705,10 +712,12 @@ async def syncecourtsorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     try:
         result = await asyncio.to_thread(scan_order_inbox, 10, True)
+        proposals = await asyncio.to_thread(generate_order_work_proposals, 10)
         await waiting.edit_text(
             "✅ Order Inbox scan complete.\n\n"
             f"PDFs present: {result['files_seen']}\n"
             f"Processed/retried: {result['processed_count']}\n\n"
+            f"New AI work proposal(s): {len(proposals)}\n\n"
             "Use /ecourtsorders to review the results."
         )
         for item in result["results"]:
@@ -722,6 +731,52 @@ async def syncecourtsorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await waiting.edit_text(
             f"❌ Order Inbox scan failed safely: {type(exc).__name__}: {str(exc)[:800]}"
         )
+
+
+def _work_proposal_text(item: dict) -> str:
+    return (
+        "🤖 <b>eCOURTS AI WORK PROPOSAL</b>\n\n"
+        f"Case: <b>{html.escape(str(item.get('case_number') or '-'))}</b>\n"
+        f"CNR: <code>{html.escape(str(item.get('cino') or '-'))}</code>\n"
+        f"Assign to current owner: <b>{html.escape(str(item.get('assigned_to') or '-'))}</b>\n"
+        f"Priority: <b>{html.escape(str(item.get('priority') or 'NORMAL'))}</b>\n"
+        f"Due: <b>{html.escape(str(item.get('due_date') or 'Not proposed'))}</b>\n\n"
+        f"<b>{html.escape(str(item.get('title') or 'Review interim order'))}</b>\n"
+        f"{html.escape(str(item.get('details') or 'No details supplied.'))}\n\n"
+        "This is an AI proposal. It becomes an assigned office Work only after your approval."
+    )
+
+
+async def _send_work_proposal(message) -> None:
+    rows = await asyncio.to_thread(list_work_proposals, 1, "PENDING_ADMIN")
+    if not rows:
+        await message.reply_text("✅ No eCourts AI work proposals await approval.")
+        return
+    item = rows[0]
+    await message.reply_text(
+        _work_proposal_text(item)[:4096],
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "✅ Approve & Assign",
+                    callback_data=f"ecr:workapprove:{item['id']}",
+                ),
+                InlineKeyboardButton(
+                    "❌ Reject",
+                    callback_data=f"ecr:workreject:{item['id']}",
+                ),
+            ],
+            [InlineKeyboardButton("⬅️ eCourts Dashboard", callback_data="ecr:home")],
+        ]),
+    )
+
+
+async def ecourtswork(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    await asyncio.to_thread(generate_order_work_proposals, 10)
+    await _send_work_proposal(update.effective_message)
 
 
 async def _alert_changes(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -834,6 +889,10 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "review":
         await _send_pending_change(query.message)
         return
+    if action == "workqueue":
+        await asyncio.to_thread(generate_order_work_proposals, 10)
+        await _send_work_proposal(query.message)
+        return
     if action in {"groupapprove", "groupreject"}:
         if (
             len(parts) < 4
@@ -850,6 +909,33 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "APPROVE" if action == "groupapprove" else "REJECT",
                 update.effective_user.id,
             )
+            ad_sync = None
+            new_proposals = []
+            if (
+                action == "groupapprove"
+                and result.get("review_status") != "ALREADY_REVIEWED"
+            ):
+                ad_sync = await asyncio.to_thread(
+                    sync_approved_case_to_ad,
+                    int(parts[2]),
+                    parts[3],
+                    update.effective_user.id,
+                )
+                new_proposals = await asyncio.to_thread(
+                    generate_order_work_proposals, 10
+                )
+            integration_lines = ""
+            if ad_sync:
+                integration_lines += (
+                    "\n\n<b>Advocate Diaries date sync</b>\n"
+                    f"Status: <b>{html.escape(str(ad_sync.get('status') or '-'))}</b>\n"
+                    f"{html.escape(str(ad_sync.get('message') or ''))}"
+                )
+            if new_proposals:
+                integration_lines += (
+                    f"\n\n🤖 <b>{len(new_proposals)} AI work proposal(s)</b> "
+                    "are ready for administrator approval."
+                )
             await query.edit_message_text(
                 (
                     "✅ <b>eCOURTS CASE UPDATE REVIEWED</b>\n\n"
@@ -858,14 +944,72 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Fields applied: <b>{len(result.get('applied_fields') or [])}</b>\n"
                     f"Record-only fields: <b>{len(result.get('unmapped_fields') or [])}</b>\n\n"
                     f"{html.escape(str(result.get('apply_message') or 'Recorded.'))}"
+                    f"{integration_lines}"
                 ),
                 parse_mode=ParseMode.HTML,
             )
             await _send_pending_change(query.message)
+            if new_proposals:
+                await _send_work_proposal(query.message)
         except Exception as exc:
             await query.message.reply_text(
                 f"❌ Grouped review could not be completed safely: "
                 f"{html.escape(str(exc))}",
+                parse_mode=ParseMode.HTML,
+            )
+        return
+    if action in {"workapprove", "workreject"}:
+        if len(parts) < 3 or not parts[2].isdigit():
+            await query.message.reply_text("❌ Invalid AI work proposal reference.")
+            return
+        try:
+            result = await asyncio.to_thread(
+                review_work_proposal,
+                int(parts[2]),
+                "APPROVE" if action == "workapprove" else "REJECT",
+                update.effective_user.id,
+            )
+            if result.get("already_reviewed"):
+                text = (
+                    "ℹ️ This AI work proposal was already reviewed. "
+                    f"Stored status: {result.get('proposal_status')}."
+                )
+            elif action == "workapprove":
+                text = (
+                    "✅ <b>eCOURTS WORK APPROVED</b>\n\n"
+                    f"Case: <b>{html.escape(str(result.get('case_number') or '-'))}</b>\n"
+                    f"Assigned to: <b>{html.escape(str(result.get('assigned_to') or '-'))}</b>\n"
+                    f"Work ID: <b>{html.escape(str(result.get('case_work_id') or '-'))}</b>\n\n"
+                    "The Work is now visible in the Office OS work board."
+                )
+            else:
+                text = "❌ AI work proposal rejected. No office Work was created."
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+            if (
+                action == "workapprove"
+                and result.get("telegram_user_id")
+                and not result.get("already_reviewed")
+            ):
+                try:
+                    await context.bot.send_message(
+                        chat_id=result["telegram_user_id"],
+                        text=(
+                            "📌 <b>NEW eCOURTS ORDER WORK</b>\n\n"
+                            f"Case: <b>{html.escape(str(result.get('case_number') or '-'))}</b>\n"
+                            f"Priority: <b>{html.escape(str(result.get('priority') or 'NORMAL'))}</b>\n"
+                            f"Due: <b>{html.escape(str(result.get('due_date') or 'Not fixed'))}</b>\n\n"
+                            f"<b>{html.escape(str(result.get('title') or 'Review order'))}</b>\n"
+                            f"{html.escape(str(result.get('details') or ''))}\n\n"
+                            "Use /myworks to view your pending Works."
+                        )[:4096],
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    logger.exception("Could not notify assigned case owner")
+            await _send_work_proposal(query.message)
+        except Exception as exc:
+            await query.message.reply_text(
+                f"❌ Work proposal review failed safely: {html.escape(str(exc))}",
                 parse_mode=ParseMode.HTML,
             )
         return
@@ -900,11 +1044,15 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⏳ Scanning the eCourts Order Inbox…")
         try:
             result = await asyncio.to_thread(scan_order_inbox, 10, True)
+            proposals = await asyncio.to_thread(generate_order_work_proposals, 10)
             await query.message.reply_text(
                 "✅ Order Inbox scan complete.\n"
                 f"PDFs present: {result['files_seen']}\n"
-                f"Processed/retried: {result['processed_count']}"
+                f"Processed/retried: {result['processed_count']}\n"
+                f"New AI work proposal(s): {len(proposals)}"
             )
+            if proposals:
+                await _send_work_proposal(query.message)
         except Exception as exc:
             await query.message.reply_text(
                 f"❌ Order scan failed safely: {type(exc).__name__}: {str(exc)[:700]}"
@@ -999,7 +1147,28 @@ async def ecourts_order_inbox_job(context: ContextTypes.DEFAULT_TYPE):
             max(1, int(os.getenv("ECOURTS_ORDER_MAX_FILES_PER_SCAN", "5"))),
             False,
         )
+        proposals = await asyncio.to_thread(generate_order_work_proposals, 10)
         await _alert_orders(context)
+        for item in proposals:
+            for destination in _admin_destinations():
+                try:
+                    await context.bot.send_message(
+                        chat_id=destination,
+                        text=_work_proposal_text(item)[:4096],
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton(
+                                "✅ Approve & Assign",
+                                callback_data=f"ecr:workapprove:{item['id']}",
+                            ),
+                            InlineKeyboardButton(
+                                "❌ Reject",
+                                callback_data=f"ecr:workreject:{item['id']}",
+                            ),
+                        ]]),
+                    )
+                except Exception:
+                    logger.exception("Could not deliver eCourts AI work proposal")
     except Exception:
         logger.exception("Scheduled eCourts order inbox scan failed")
 
@@ -1044,4 +1213,5 @@ def register_ecourts_handlers(app) -> None:
     app.add_handler(CommandHandler("ecourtsops", ecourtsops))
     app.add_handler(CommandHandler("ecourtsorders", ecourtsorders))
     app.add_handler(CommandHandler("syncecourtsorders", syncecourtsorders))
+    app.add_handler(CommandHandler("ecourtswork", ecourtswork))
     app.add_handler(CallbackQueryHandler(ecourts_callback, pattern=r"^ecr:"))
