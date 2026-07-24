@@ -1043,7 +1043,35 @@ def review_ecourts_change_group(
         names = [column.name for column in cur.description]
         items = [dict(zip(names, row)) for row in cur.fetchall()]
         if not items:
-            raise ValueError("No pending changes remain for this case.")
+            cur.execute("""
+                SELECT display_case_number, local_case_pk,
+                       ARRAY_AGG(id ORDER BY id),
+                       ARRAY_AGG(DISTINCT review_status)
+                FROM ecourts_case_changes
+                WHERE sync_run_id=%s AND cino=%s
+                GROUP BY display_case_number, local_case_pk
+                ORDER BY MAX(id) DESC
+                LIMIT 1
+            """, (int(sync_run_id), normalized_cino))
+            reviewed = cur.fetchone()
+            if reviewed:
+                statuses = [str(value) for value in (reviewed[3] or [])]
+                return {
+                    "sync_run_id": int(sync_run_id),
+                    "cino": normalized_cino,
+                    "local_case_pk": reviewed[1],
+                    "display_case_number": reviewed[0],
+                    "change_ids": list(reviewed[2] or []),
+                    "review_status": "ALREADY_REVIEWED",
+                    "applied_fields": [],
+                    "unmapped_fields": [],
+                    "apply_message": (
+                        "This case update was already reviewed. "
+                        f"Stored status: {', '.join(statuses) or 'REVIEWED'}. "
+                        "No duplicate update was performed."
+                    ),
+                }
+            raise ValueError("The referenced eCourts change group was not found.")
         local_pks = {
             str(item.get("local_case_pk"))
             for item in items
