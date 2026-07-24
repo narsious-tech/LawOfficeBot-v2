@@ -3712,7 +3712,10 @@ app.add_handler(
         test_manual_deadline_reminder
     )
 )
-app.add_handler(CommandHandler("commands", commands))
+# Sprint 26 owns /commands and /help through the role-aware registry.
+# Keep the legacy ``commands`` function above as rollback/reference code, but
+# do not register it in a second handler group (PTB processes one matching
+# handler per group, which previously produced both directories).
 
 app.add_handler(upload_handler)
 app.add_handler(CommandHandler("casefolder", casefolder))
