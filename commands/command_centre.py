@@ -65,6 +65,11 @@ ITEMS = (
     MenuItem("newcase", "➕ New Case", "newcase", "Guided new-case workflow.", "cases", "supervisor", direct=False, usage="/newcase"),
     MenuItem("timeline", "🕘 Client Timeline", "clienttimeline", "Case/client procedural timeline.", "cases", direct=False, usage="/clienttimeline CASE_NUMBER"),
     MenuItem("verification", "📱 Client Verification", "pendingclientverification", "Pending client confirmations.", "cases", "supervisor"),
+    MenuItem("mobileaudit", "📊 Mobile Data Audit", "mobileaudit", "Client mobile-number coverage and link health.", "cases", "supervisor"),
+    MenuItem("missingmobiles", "📵 Missing Mobiles", "missingmobilesreport", "Cases missing usable client mobile numbers.", "cases", "supervisor"),
+    MenuItem("mobilequeue", "📱 Mobile Update Queue", "mobileupdatequeue", "Client-wise Advocate Diaries mobile update checklist.", "cases", "supervisor"),
+    MenuItem("mobilequeuesummary", "📈 Mobile Queue Summary", "mobileupdatequeuesummary", "Mobile update workload totals.", "cases", "supervisor"),
+    MenuItem("repairmobiles", "🛠 Repair Mobile Links", "repairmobiles", "Repair client links and locally recoverable mobile data.", "cases", "admin"),
 
     # Work
     MenuItem("mydashboard", "👤 My Dashboard", "mydashboard", "Personal workload dashboard.", "work"),
@@ -98,6 +103,8 @@ ITEMS = (
     MenuItem("pendingfees", "🧾 Pending Fees", "pendingfees", "Cases with outstanding fees.", "accounts", "supervisor"),
 
     # Communications
+    MenuItem("welcomeclient", "👋 Welcome Client", "welcomeclient", "Prepare and send the client welcome workflow.", "communications", "supervisor", False, "/welcomeclient CASE_NUMBER"),
+    MenuItem("newcasewelcome", "📨 New Case Welcome", "newcasewelcome", "Full welcome and verification message for a new case.", "communications", "supervisor", False, "/newcasewelcome CASE_NUMBER"),
     MenuItem("emailstatus", "📨 Email Alert Status", "emailalertstatus", "Gmail and Yahoo monitoring health.", "communications", "supervisor"),
     MenuItem("messagehistory", "💬 Message History", "messagehistory", "Client communication history.", "communications", "supervisor"),
     MenuItem("whatsapp", "🟢 WhatsApp Desk", "whatsappstatus", "WhatsApp Cloud API operations.", "communications", "admin"),
@@ -109,6 +116,7 @@ ITEMS = (
     MenuItem("commands", "📚 Command Directory", "commands", "Search every registered command.", "admin"),
     MenuItem("officestatus", "🏢 Office Status", "officestatus", "Operational status overview.", "admin", "supervisor"),
     MenuItem("sync", "🔄 Sync Cases", "synccases", "Synchronize Advocate Diaries cases.", "admin", "admin"),
+    MenuItem("mobilesync", "🔄 Mobile-Aware Sync", "synccasesv3", "Synchronize Advocate Diaries client links and mobile data.", "admin", "admin"),
     MenuItem("emailtest", "🧪 Test Email Alerts", "testemailalerts", "Run the email monitor now.", "admin", "admin"),
     MenuItem("chatid", "🪪 My Telegram ID", "mychatid", "Show chat and user identifiers.", "admin"),
 )
