@@ -838,7 +838,8 @@ def list_ecourts_change_groups(
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT ch.sync_run_id, ch.cino, ch.local_case_pk,
+            SELECT ch.sync_run_id, ch.cino,
+                   COALESCE(ch.local_case_pk, link.local_case_pk) AS local_case_pk,
                    MAX(ch.display_case_number) AS display_case_number,
                    MAX(c.case_title) AS case_title,
                    MAX(c.client_name) AS client_name,
@@ -859,10 +860,14 @@ def list_ecourts_change_groups(
                        ELSE 'INFO'
                    END AS severity
             FROM ecourts_case_changes ch
-            LEFT JOIN cases c ON c.id::text=ch.local_case_pk
+            LEFT JOIN ecourts_case_links link
+              ON link.cino=ch.cino AND link.link_status='APPROVED'
+            LEFT JOIN cases c
+              ON c.id::text=COALESCE(ch.local_case_pk, link.local_case_pk)
             WHERE ch.review_status=%s
               AND (%s=FALSE OR ch.alerted_at IS NULL)
-            GROUP BY ch.sync_run_id, ch.cino, ch.local_case_pk
+            GROUP BY ch.sync_run_id, ch.cino,
+                     COALESCE(ch.local_case_pk, link.local_case_pk)
             ORDER BY MAX(ch.id) DESC
             LIMIT %s
         """, (
@@ -1039,11 +1044,55 @@ def review_ecourts_change_group(
         items = [dict(zip(names, row)) for row in cur.fetchall()]
         if not items:
             raise ValueError("No pending changes remain for this case.")
-        local_pks = {str(item.get("local_case_pk") or "") for item in items}
-        if len(local_pks) != 1 or "" in local_pks:
-            raise ValueError("The grouped changes do not have one valid Office OS case.")
-        local_pk = next(iter(local_pks))
+        local_pks = {
+            str(item.get("local_case_pk"))
+            for item in items
+            if item.get("local_case_pk") is not None
+            and str(item.get("local_case_pk")).strip()
+        }
+        if len(local_pks) > 1:
+            raise ValueError(
+                "The grouped changes contain conflicting Office OS case references."
+            )
+        stored_local_pk = next(iter(local_pks), None)
+        cur.execute("""
+            SELECT DISTINCT local_case_pk
+            FROM ecourts_case_links
+            WHERE cino=%s AND link_status='APPROVED'
+        """, (normalized_cino,))
+        approved_local_pks = {
+            str(row[0]) for row in cur.fetchall() if row[0] is not None
+        }
+        if len(approved_local_pks) > 1:
+            raise ValueError(
+                "This CNR has conflicting approved Office OS case links."
+            )
+        approved_local_pk = next(iter(approved_local_pks), None)
+        if (
+            stored_local_pk
+            and approved_local_pk
+            and stored_local_pk != approved_local_pk
+        ):
+            raise ValueError(
+                "The historical change reference conflicts with the approved CNR link."
+            )
+        local_pk = approved_local_pk or stored_local_pk
+        if decision == "APPROVE" and not approved_local_pk:
+            raise ValueError(
+                "This CNR is not linked to an approved Office OS case. "
+                "Link the case first, then review the update."
+            )
+        if local_pk:
+            cur.execute("SELECT 1 FROM cases WHERE id::text=%s", (local_pk,))
+            if not cur.fetchone():
+                raise ValueError("The referenced Office OS case no longer exists.")
         change_ids = [int(item["id"]) for item in items]
+        if local_pk:
+            cur.execute("""
+                UPDATE ecourts_case_changes
+                SET local_case_pk=%s
+                WHERE id=ANY(%s) AND local_case_pk IS NULL
+            """, (local_pk, change_ids))
 
         if decision == "REJECT":
             message = (
