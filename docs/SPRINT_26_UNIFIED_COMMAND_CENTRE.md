@@ -1,6 +1,6 @@
 # Sprint 26 — Unified Role-Aware Command Centre
 
-Build: Sprint 26.0.1 registration compatibility hotfix.
+Build: Sprint 26.0.2 duplicate legacy-directory hotfix.
 
 ## Entry points
 
@@ -11,6 +11,9 @@ Build: Sprint 26.0.1 registration compatibility hotfix.
 
 The earlier Sprint 19 `/start`, `/office`, `/mywork`, and `/supervisor`
 interfaces remain available. No existing production command was removed.
+The historical static `/commands` function remains in `bot.py` for rollback,
+but its duplicate handler registration is disabled so only the searchable
+role-aware directory is sent.
 
 ## Role filtering
 
