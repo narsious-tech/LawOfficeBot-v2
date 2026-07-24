@@ -1,5 +1,7 @@
 # Sprint 26 — Unified Role-Aware Command Centre
 
+Build: Sprint 26.0.1 registration compatibility hotfix.
+
 ## Entry points
 
 - `/menu` — interactive Law Office OS control centre.
