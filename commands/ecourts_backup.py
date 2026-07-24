@@ -439,8 +439,9 @@ def _review_keyboard(item: dict) -> InlineKeyboardMarkup:
 def _group_review_keyboard(item: dict) -> InlineKeyboardMarkup:
     run_id = int(item["sync_run_id"])
     cino = str(item["cino"])
-    return InlineKeyboardMarkup([
-        [
+    rows = []
+    if item.get("local_case_pk"):
+        rows.append([
             InlineKeyboardButton(
                 "✅ Approve Case Update",
                 callback_data=f"ecr:groupapprove:{run_id}:{cino}",
@@ -449,12 +450,19 @@ def _group_review_keyboard(item: dict) -> InlineKeyboardMarkup:
                 "❌ Reject All",
                 callback_data=f"ecr:groupreject:{run_id}:{cino}",
             ),
-        ],
-        [
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton(
+                "🗑 Acknowledge — Not Linked",
+                callback_data=f"ecr:groupreject:{run_id}:{cino}",
+            ),
+        ])
+    rows.append([
             InlineKeyboardButton("📥 Scan Order Inbox", callback_data="ecr:orderscan"),
             InlineKeyboardButton("⬅️ eCourts Dashboard", callback_data="ecr:home"),
-        ],
     ])
+    return InlineKeyboardMarkup(rows)
 
 
 def _group_change_text(item: dict) -> str:
@@ -471,6 +479,12 @@ def _group_change_text(item: dict) -> str:
     ]
     if item.get("case_title"):
         lines.append(f"Title: {html.escape(str(item['case_title']))}")
+    if item.get("local_case_pk"):
+        lines.append("🔗 Office OS link: <b>Approved</b>")
+    else:
+        lines.append(
+            "🔴 Office OS link: <b>Missing — this update cannot be applied</b>"
+        )
     lines.extend(["", "<b>CHANGES DETECTED</b>"])
     values: dict[str, str] = {}
     for change in item.get("changes") or []:
@@ -498,12 +512,18 @@ def _group_change_text(item: dict) -> str:
     lines.append(f"📄 Order: <b>{html.escape(order_label)}</b>")
     if item.get("order_drive_link"):
         lines.append(f"🔗 {html.escape(str(item['order_drive_link']))}")
-    lines.extend([
-        "",
-        "Approval applies all safely mapped fields in one transaction and "
-        "creates a preparation follow-up entry. Original change records remain "
-        "available in the audit history.",
-    ])
+    lines.append("")
+    if item.get("local_case_pk"):
+        lines.append(
+            "Approval applies all safely mapped fields in one transaction and "
+            "creates a preparation follow-up entry. Original change records remain "
+            "available in the audit history."
+        )
+    else:
+        lines.append(
+            "Link this CNR to the correct Office OS case before applying changes. "
+            "You may acknowledge this notification without changing Office OS."
+        )
     return "\n".join(lines)
 
 
