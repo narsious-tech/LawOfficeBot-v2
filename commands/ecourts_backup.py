@@ -18,11 +18,13 @@ from services.ecourts_backup_service import (
     ecourts_operations_summary,
     ensure_ecourts_schema,
     inspect_backup_record,
+    list_ecourts_change_groups,
     list_ecourts_changes,
     latest_reconciliation,
     mark_ecourts_changes_alerted,
     reject_match,
     review_ecourts_change,
+    review_ecourts_change_group,
     synchronize_backups,
 )
 from services.ecourts_order_service import (
@@ -434,6 +436,77 @@ def _review_keyboard(item: dict) -> InlineKeyboardMarkup:
     ])
 
 
+def _group_review_keyboard(item: dict) -> InlineKeyboardMarkup:
+    run_id = int(item["sync_run_id"])
+    cino = str(item["cino"])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ Approve Case Update",
+                callback_data=f"ecr:groupapprove:{run_id}:{cino}",
+            ),
+            InlineKeyboardButton(
+                "❌ Reject All",
+                callback_data=f"ecr:groupreject:{run_id}:{cino}",
+            ),
+        ],
+        [
+            InlineKeyboardButton("📥 Scan Order Inbox", callback_data="ecr:orderscan"),
+            InlineKeyboardButton("⬅️ eCourts Dashboard", callback_data="ecr:home"),
+        ],
+    ])
+
+
+def _group_change_text(item: dict) -> str:
+    severity_icon = {
+        "CRITICAL": "🚨",
+        "IMPORTANT": "⚠️",
+        "INFO": "ℹ️",
+    }.get(str(item.get("severity") or "INFO"), "ℹ️")
+    lines = [
+        f"{severity_icon} <b>eCOURTS CASE UPDATE — ADMIN DECISION</b>",
+        "",
+        f"⚖️ Case: <b>{html.escape(str(item.get('display_case_number') or '-'))}</b>",
+        f"CNR: <code>{html.escape(str(item.get('cino') or '-'))}</code>",
+    ]
+    if item.get("case_title"):
+        lines.append(f"Title: {html.escape(str(item['case_title']))}")
+    lines.extend(["", "<b>CHANGES DETECTED</b>"])
+    values: dict[str, str] = {}
+    for change in item.get("changes") or []:
+        field_name = str(change.get("field_name") or "")
+        values[field_name] = str(change.get("new_value") or "")
+        label = FIELD_LABELS.get(field_name, field_name or "Field")
+        lines.extend([
+            label,
+            f"Previous: <code>{html.escape(str(change.get('old_value') or 'Not recorded'))}</code>",
+            f"New: <code>{html.escape(str(change.get('new_value') or 'Not recorded'))}</code>",
+        ])
+    lines.extend([
+        "",
+        "<b>CONSOLIDATED POSITION</b>",
+        f"⏮ Hearing completed: <b>{html.escape(values.get('last_hearing_date') or 'No change detected')}</b>",
+        f"📅 Next hearing: <b>{html.escape(values.get('next_hearing_date') or 'No change detected')}</b>",
+        f"📝 Purpose: <b>{html.escape(values.get('purpose_name') or 'Not supplied by backup')}</b>",
+    ])
+    order_status = str(item.get("order_status") or "AWAITING_PDF")
+    order_label = (
+        "Awaiting PDF / scan required"
+        if order_status == "AWAITING_PDF"
+        else order_status.replace("_", " ").title()
+    )
+    lines.append(f"📄 Order: <b>{html.escape(order_label)}</b>")
+    if item.get("order_drive_link"):
+        lines.append(f"🔗 {html.escape(str(item['order_drive_link']))}")
+    lines.extend([
+        "",
+        "Approval applies all safely mapped fields in one transaction and "
+        "creates a preparation follow-up entry. Original change records remain "
+        "available in the audit history.",
+    ])
+    return "\n".join(lines)
+
+
 def _operations_text(data: dict) -> str:
     last_sync = data.get("last_sync_at")
     last_sync_text = (
@@ -460,7 +533,7 @@ def _operations_text(data: dict) -> str:
 
 
 async def _send_pending_change(message) -> None:
-    rows = await asyncio.to_thread(list_ecourts_changes, 1, False, "PENDING")
+    rows = await asyncio.to_thread(list_ecourts_change_groups, 1, "PENDING")
     if not rows:
         await message.reply_text(
             "✅ No eCourts changes are waiting for administrator review."
@@ -468,12 +541,10 @@ async def _send_pending_change(message) -> None:
         return
     item = rows[0]
     await message.reply_text(
-        "🛡 <b>eCOURTS CHANGE — ADMIN DECISION</b>\n\n"
-        + _change_text(item)
-        + "\n\nApprove only after checking the CNR and case. Unsupported fields "
-        "are recorded as approved but are never forced into Office OS.",
+        _group_change_text(item)[:4096],
         parse_mode=ParseMode.HTML,
-        reply_markup=_review_keyboard(item),
+        reply_markup=_group_review_keyboard(item),
+        disable_web_page_preview=True,
     )
 
 
@@ -634,25 +705,33 @@ async def syncecourtsorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _alert_changes(context: ContextTypes.DEFAULT_TYPE) -> None:
-    changes = await asyncio.to_thread(list_ecourts_changes, 100, True)
-    if not changes:
+    groups = await asyncio.to_thread(
+        list_ecourts_change_groups, 100, "PENDING", True
+    )
+    if not groups:
         return
     destinations = _admin_destinations()
     sent = False
     for destination in destinations:
-        for item in changes:
+        for item in groups:
             try:
                 await context.bot.send_message(
                     chat_id=destination,
-                    text="🔔 <b>eCOURTS CHANGE DETECTED</b>\n\n" + _change_text(item),
+                    text="🔔 " + _group_change_text(item)[:4000],
                     parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
                 )
                 sent = True
             except Exception:
                 logger.exception("Could not deliver eCourts change alert")
     if sent:
+        change_ids = [
+            int(change_id)
+            for item in groups
+            for change_id in (item.get("change_ids") or [])
+        ]
         await asyncio.to_thread(
-            mark_ecourts_changes_alerted, [int(item["id"]) for item in changes]
+            mark_ecourts_changes_alerted, change_ids
         )
 
 
@@ -734,6 +813,41 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if action == "review":
         await _send_pending_change(query.message)
+        return
+    if action in {"groupapprove", "groupreject"}:
+        if (
+            len(parts) < 4
+            or not parts[2].isdigit()
+            or len(parts[3]) != 16
+        ):
+            await query.message.reply_text("❌ Invalid grouped eCourts review reference.")
+            return
+        try:
+            result = await asyncio.to_thread(
+                review_ecourts_change_group,
+                int(parts[2]),
+                parts[3],
+                "APPROVE" if action == "groupapprove" else "REJECT",
+                update.effective_user.id,
+            )
+            await query.edit_message_text(
+                (
+                    "✅ <b>eCOURTS CASE UPDATE REVIEWED</b>\n\n"
+                    f"Case: <b>{html.escape(str(result.get('display_case_number') or '-'))}</b>\n"
+                    f"Decision: <b>{html.escape(str(result.get('review_status') or '-'))}</b>\n"
+                    f"Fields applied: <b>{len(result.get('applied_fields') or [])}</b>\n"
+                    f"Record-only fields: <b>{len(result.get('unmapped_fields') or [])}</b>\n\n"
+                    f"{html.escape(str(result.get('apply_message') or 'Recorded.'))}"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            await _send_pending_change(query.message)
+        except Exception as exc:
+            await query.message.reply_text(
+                f"❌ Grouped review could not be completed safely: "
+                f"{html.escape(str(exc))}",
+                parse_mode=ParseMode.HTML,
+            )
         return
     if action in {"changeapprove", "changereject"}:
         if len(parts) < 3 or not parts[2].isdigit():
