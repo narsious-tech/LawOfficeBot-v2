@@ -1,6 +1,6 @@
 # Sprint 26 — Unified Role-Aware Command Centre
 
-Build: Sprint 26.0.2 duplicate legacy-directory hotfix.
+Build: Sprint 26.0.3 complete mobile and client-welcome directory.
 
 ## Entry points
 
@@ -14,6 +14,22 @@ interfaces remain available. No existing production command was removed.
 The historical static `/commands` function remains in `bot.py` for rollback,
 but its duplicate handler registration is disabled so only the searchable
 role-aware directory is sent.
+
+The directory now also exposes the existing client-welcome and mobile-data
+operations:
+
+- `/welcomeclient`
+- `/newcasewelcome`
+- `/mobileaudit`
+- `/missingmobilesreport`
+- `/mobileupdatequeue`
+- `/mobileupdatequeuesummary`
+- `/repairmobiles`
+- `/synccasesv3`
+
+Repair and synchronization controls remain administrator-only. Reports,
+queues, and client-welcome operations are available to supervisors and the
+administrator.
 
 ## Role filtering
 
