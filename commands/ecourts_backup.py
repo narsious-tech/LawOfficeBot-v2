@@ -21,6 +21,7 @@ from services.ecourts_backup_service import (
     list_ecourts_changes,
     latest_reconciliation,
     mark_ecourts_changes_alerted,
+    reject_match,
     review_ecourts_change,
     synchronize_backups,
 )
@@ -208,7 +209,9 @@ def _render_list(kind: str, data: dict, page: int = 1, page_size: int = 15) -> s
             lines.append(
                 f"{index}. <b>{html.escape(str(local.get('_number') or '-'))}</b> ↔ "
                 f"<b>{html.escape(str(backup.get('display_case_number') or '-'))}</b>\n"
-                f"   Confidence: {float(item.get('confidence') or 0):.0%}\n"
+                f"   Safety: {html.escape(str(item.get('match_strength') or 'VERIFY'))}\n"
+                f"   Conservative score: {float(item.get('confidence') or 0):.0%}\n"
+                f"   Parties: {float(item.get('party_score') or 0):.0%} similar\n"
                 f"   Approve: <code>/ecourtsapprove {html.escape(str(local.get('_pk')))} "
                 f"{html.escape(str(backup.get('cino')))}</code>"
             )
@@ -480,6 +483,67 @@ async def ecourtsreview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_pending_change(update.effective_message)
 
 
+async def _send_possible_match(message) -> None:
+    data = await asyncio.to_thread(latest_reconciliation)
+    rows = data.get("possible", [])
+    if not rows:
+        await message.reply_text(
+            "✅ No safe possible matches are waiting for verification.\n"
+            "Unsafe duplicate-CNR suggestions are shown under Conflicts."
+        )
+        return
+    item = rows[0]
+    local, backup = item["local"], item["backup"]
+    reasons = "\n".join(
+        f"• {html.escape(str(reason))}" for reason in item.get("reasons", [])
+    )
+    local_title = local.get("case_title") or (
+        f"{local.get('client_name') or '-'} vs {local.get('opposite_party') or '-'}"
+    )
+    backup_title = (
+        f"{backup.get('petitioner_name') or '-'} vs "
+        f"{backup.get('respondent_name') or '-'}"
+    )
+    await message.reply_text(
+        "🟠 <b>POSSIBLE eCOURTS MATCH</b>\n\n"
+        "<b>OFFICE OS</b>\n"
+        f"Case: <b>{html.escape(str(local.get('_number') or '-'))}</b>\n"
+        f"Title: {html.escape(str(local_title))}\n"
+        f"Court: {html.escape(str(local.get('court_name') or '-'))}\n\n"
+        "<b>eCOURTS BACKUP</b>\n"
+        f"Case: <b>{html.escape(str(backup.get('display_case_number') or '-'))}</b>\n"
+        f"Title: {html.escape(backup_title)}\n"
+        f"Court: {html.escape(str(backup.get('court_designation') or '-'))}\n"
+        f"CNR: <code>{html.escape(str(backup.get('cino') or '-'))}</code>\n\n"
+        f"Safety: <b>{html.escape(str(item.get('match_strength') or 'VERIFY'))}</b>\n"
+        f"Conservative score: <b>{float(item.get('confidence') or 0):.0%}</b>\n"
+        f"{reasons}\n\n"
+        "Approve only after confirming that both records are the same case.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "✅ Same Case — Approve",
+                callback_data=(
+                    f"ecr:matchapprove:{local['_pk']}:{backup['cino']}"
+                ),
+            )],
+            [InlineKeyboardButton(
+                "❌ Not the Same Case",
+                callback_data=(
+                    f"ecr:matchreject:{local['_pk']}:{backup['cino']}"
+                ),
+            )],
+            [InlineKeyboardButton("⬅️ eCourts Dashboard", callback_data="ecr:home")],
+        ]),
+    )
+
+
+async def ecourtsmatches(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    await _send_possible_match(update.effective_message)
+
+
 async def ecourtsops(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _authorize(update):
         return
@@ -635,6 +699,39 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _summary(data), parse_mode=ParseMode.HTML, reply_markup=_keyboard()
         )
         return
+    if action in {"matchapprove", "matchreject"}:
+        if len(parts) < 4:
+            await query.message.reply_text("❌ Invalid match reference.")
+            return
+        local_pk, cino = parts[2], parts[3]
+        try:
+            if action == "matchapprove":
+                await asyncio.to_thread(
+                    approve_link, local_pk, cino, update.effective_user.id
+                )
+                result_text = (
+                    "✅ Match approved. The CNR is now linked to the Office OS case."
+                )
+            else:
+                await asyncio.to_thread(
+                    reject_match,
+                    local_pk,
+                    cino,
+                    update.effective_user.id,
+                    "Rejected from Telegram match review",
+                )
+                result_text = (
+                    "❌ Suggestion rejected. This case/CNR pair will not be "
+                    "suggested again."
+                )
+            await query.edit_message_text(result_text)
+            await _send_possible_match(query.message)
+        except Exception as exc:
+            await query.message.reply_text(
+                f"❌ Match decision failed safely: {html.escape(str(exc))}",
+                parse_mode=ParseMode.HTML,
+            )
+        return
     if action == "review":
         await _send_pending_change(query.message)
         return
@@ -721,6 +818,9 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as exc:
             await query.edit_message_text(f"❌ Export failed safely: {exc}", reply_markup=_keyboard())
         return
+    if action == "possible":
+        await _send_possible_match(query.message)
+        return
     data = await asyncio.to_thread(latest_reconciliation)
     if action == "backup":
         text = (
@@ -806,6 +906,7 @@ def register_ecourts_handlers(app) -> None:
     app.add_handler(CommandHandler("ecourtsinspect", ecourtsinspect))
     app.add_handler(CommandHandler("ecourtschanges", ecourtschanges))
     app.add_handler(CommandHandler("ecourtsreview", ecourtsreview))
+    app.add_handler(CommandHandler("ecourtsmatches", ecourtsmatches))
     app.add_handler(CommandHandler("ecourtsops", ecourtsops))
     app.add_handler(CommandHandler("ecourtsorders", ecourtsorders))
     app.add_handler(CommandHandler("syncecourtsorders", syncecourtsorders))
