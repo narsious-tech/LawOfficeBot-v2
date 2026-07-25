@@ -70,6 +70,10 @@ from commands.ai import build_ai_handler
 from commands.evening_dashboard import (
     eveningdashboard, printablecauselist, evening_dashboard_job,
     filesready, evening_file_checkin_callback, evening_file_selection_callback,
+    saturday_monday_file_finalization_job,
+    sunday_file_arrival_job,
+    sunday_missing_files_escalation_job,
+    sunday_final_file_readiness_job,
 )
 from commands.workspace_v13 import (
     caseworkspace13, workboard, myworks, workspace13_callback,
@@ -4078,6 +4082,30 @@ app.job_queue.run_daily(
     evening_dashboard_job,
     time=time(hour=16, minute=30, tzinfo=ZoneInfo("Asia/Kolkata")),
     name="evening_dashboard_430pm"
+)
+
+app.job_queue.run_daily(
+    saturday_monday_file_finalization_job,
+    time=time(hour=13, minute=0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="working_saturday_monday_files_100pm",
+)
+
+app.job_queue.run_daily(
+    sunday_file_arrival_job,
+    time=time(hour=14, minute=0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="sunday_monday_file_arrival_200pm",
+)
+
+app.job_queue.run_daily(
+    sunday_missing_files_escalation_job,
+    time=time(hour=17, minute=15, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="sunday_missing_monday_files_515pm",
+)
+
+app.job_queue.run_daily(
+    sunday_final_file_readiness_job,
+    time=time(hour=17, minute=45, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="sunday_final_monday_readiness_545pm",
 )
 
 app.job_queue.run_daily(
