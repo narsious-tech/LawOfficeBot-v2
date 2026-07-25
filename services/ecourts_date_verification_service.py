@@ -67,10 +67,15 @@ def ensure_date_verification_schema() -> None:
 
 def _case_columns(cur) -> set[str]:
     cur.execute("""
-        SELECT column_name FROM information_schema.columns
+        SELECT column_name AS column_name FROM information_schema.columns
         WHERE table_schema=current_schema() AND table_name='cases'
     """)
-    return {str(row[0]) for row in cur.fetchall()}
+    columns = set()
+    for row in cur.fetchall():
+        value = row.get("column_name") if isinstance(row, dict) else row[0]
+        if value:
+            columns.add(str(value))
+    return columns
 
 
 def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, int]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import re
 from difflib import SequenceMatcher
@@ -14,6 +15,8 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 from config import DATABASE_URL
 from utils.drive import get_drive_service, ROOT_FOLDER_ID
+
+logger = logging.getLogger(__name__)
 
 DISTRICT_BACKUP_ID = os.getenv(
     "ECOURTS_DISTRICT_BACKUP_FILE_ID",
@@ -777,10 +780,21 @@ def synchronize_backups(actor_id: int | None = None) -> dict[str, Any]:
         })
         # Compare-only verification phase. Staff dates remain operational until
         # an administrator explicitly accepts a fresh eCourts conflict.
-        from services.ecourts_date_verification_service import (
-            reconcile_date_verifications,
-        )
-        result["date_verification"] = reconcile_date_verifications(run_id)
+        try:
+            from services.ecourts_date_verification_service import (
+                reconcile_date_verifications,
+            )
+            result["date_verification"] = reconcile_date_verifications(run_id)
+        except Exception as verification_exc:
+            # Reconciliation backup import is already committed successfully.
+            # A verification-layer defect must not relabel that import as failed.
+            logger.exception("eCourts date verification phase failed safely")
+            result["date_verification"] = {
+                "status": "UNAVAILABLE",
+                "error": (
+                    f"{type(verification_exc).__name__}: {verification_exc}"
+                )[:500],
+            }
         return result
     except Exception as exc:
         conn.rollback()
