@@ -12,6 +12,10 @@ from telegram.ext import ContextTypes
 from config import DATABASE_URL
 from advocate_web import AdvocateWeb
 from advocate_diaries import AdvocateDiaries
+from services.office_calendar_service import (
+    is_morning_office_open,
+    morning_closure_message,
+)
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -1557,7 +1561,12 @@ async def morningdashboard(
     context: ContextTypes.DEFAULT_TYPE
 ):
     try:
-        message = build_morning_dashboard()
+        today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+        message = (
+            build_morning_dashboard()
+            if is_morning_office_open(today)
+            else morning_closure_message(today)
+        )
 
         await send_dashboard_message(
             context,
@@ -1582,7 +1591,12 @@ async def morning_dashboard_job(context):
         return
 
     try:
-        message = build_morning_dashboard()
+        today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+        message = (
+            build_morning_dashboard()
+            if is_morning_office_open(today)
+            else morning_closure_message(today)
+        )
 
         await send_dashboard_message(
             context,
@@ -2003,6 +2017,10 @@ def build_staff_morning_briefs():
     return briefs
     
 async def staff_morning_brief_job(context):
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    if not is_morning_office_open(today):
+        print("STAFF MORNING BRIEFS SKIPPED: morning office is closed")
+        return
     try:
         briefs = build_staff_morning_briefs()
 

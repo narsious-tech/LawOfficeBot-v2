@@ -16,6 +16,11 @@ from commands.dashboard import fetch_advocate_diaries_cause_groups
 from services.case_intelligence_service import staff_telegram_id
 from services.role_intelligence_service import save_file_assignments, file_assignments
 from commands.role_intelligence import file_status_keyboard
+from services.office_calendar_service import (
+    manual_evening_plan,
+    scheduled_evening_plan,
+    working_saturday_monday_plan,
+)
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -83,7 +88,7 @@ def _physical_file_text(groups, target):
     lines = [
         "📁 PHYSICAL FILE PREPARATION",
         f"📅 {target.strftime('%d %b %Y')}",
-        f"Tomorrow's hearings: {_case_count(groups)}",
+        f"Hearings on selected court date: {_case_count(groups)}",
         "",
         "Select only the physical files that staff must bring to the evening office.",
         "Use the case-wise buttons below, then press ‘Send selected files’."
@@ -216,7 +221,14 @@ async def printablecauselist(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def eveningdashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_evening_dashboard(context, chat_id=update.effective_chat.id, force=True)
+    plan = manual_evening_plan(datetime.now(IST).date())
+    await send_evening_dashboard(
+        context,
+        chat_id=update.effective_chat.id,
+        force=True,
+        target=plan.target_date,
+        plan_heading=plan.heading,
+    )
 
 
 async def filesready(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -323,8 +335,15 @@ async def evening_file_checkin_callback(update: Update, context: ContextTypes.DE
     await query.answer("This checklist has been replaced by case-wise file selection.", show_alert=True)
 
 
-async def send_evening_dashboard(context, chat_id=None, force=False):
-    target = _target_date()
+async def send_evening_dashboard(
+    context,
+    chat_id=None,
+    force=False,
+    target=None,
+    plan_heading=None,
+):
+    target = target or _target_date()
+    plan_heading = plan_heading or "Tomorrow's court preparation"
     groups, source = await asyncio.to_thread(fetch_advocate_diaries_cause_groups, target)
     total = _case_count(groups)
     raw_destination = chat_id or os.getenv("OFFICE_GROUP_CHAT_ID") or os.getenv("PHYSICAL_FILE_GROUP_CHAT_ID")
@@ -332,6 +351,10 @@ async def send_evening_dashboard(context, chat_id=None, force=False):
         raise RuntimeError("OFFICE_GROUP_CHAT_ID or PHYSICAL_FILE_GROUP_CHAT_ID is required")
     destination = int(raw_destination)
 
+    await context.bot.send_message(
+        chat_id=destination,
+        text=f"📌 {plan_heading}\n📅 Court date: {target.strftime('%d %b %Y')}",
+    )
     text = (
         "🌆 EVENING OPERATIONS DASHBOARD\n"
         f"📅 Tomorrow: {target.strftime('%d %b %Y')}\n"
@@ -362,4 +385,112 @@ async def send_evening_dashboard(context, chat_id=None, force=False):
 
 
 async def evening_dashboard_job(context):
-    await send_evening_dashboard(context)
+    plan = scheduled_evening_plan(datetime.now(IST).date())
+    if not plan:
+        print("EVENING DASHBOARD SKIPPED: calendar has no 4:30 PM preparation run")
+        return
+    await send_evening_dashboard(
+        context,
+        target=plan.target_date,
+        plan_heading=plan.heading,
+    )
+
+
+async def saturday_monday_file_finalization_job(context):
+    plan = working_saturday_monday_plan(datetime.now(IST).date())
+    if not plan:
+        return
+    await send_evening_dashboard(
+        context,
+        target=plan.target_date,
+        plan_heading=plan.heading,
+    )
+
+
+def _sunday_destination():
+    raw = os.getenv("PHYSICAL_FILE_GROUP_CHAT_ID") or os.getenv("OFFICE_GROUP_CHAT_ID")
+    return int(raw) if raw else None
+
+
+def _sunday_file_summary(rows, target, title, final=False):
+    brought = [row for row in rows if str(row.get("status") or "").upper() == "BROUGHT"]
+    unresolved = [row for row in rows if str(row.get("status") or "SELECTED").upper() != "BROUGHT"]
+    lines = [
+        title,
+        f"📅 Monday court date: {target.strftime('%d %b %Y')}",
+        f"📁 Selected: {len(rows)} · ✅ Arrived: {len(brought)} · ⚠️ Pending: {len(unresolved)}",
+        "",
+    ]
+    if not rows:
+        lines.append("No Monday physical files have been selected yet.")
+    elif unresolved:
+        lines.append("FILES STILL REQUIRING ACTION")
+        for row in unresolved:
+            status = str(row.get("status") or "SELECTED").replace("_", " ").title()
+            lines.append(f"• {row.get('case_number') or '-'} · {status}")
+    else:
+        lines.append("✅ Every selected Monday file has reached the evening office.")
+    if final and unresolved:
+        lines.extend(["", "🚨 Monday readiness remains incomplete. Resolve it before 6:00 PM."])
+    return "\n".join(lines)
+
+
+async def sunday_file_arrival_job(context):
+    now = datetime.now(IST)
+    if now.weekday() != 6:
+        return
+    destination = _sunday_destination()
+    if not destination:
+        print("SUNDAY FILE ARRIVAL SKIPPED: no physical-file group configured")
+        return
+    target = now.date() + timedelta(days=1)
+    rows = await asyncio.to_thread(file_assignments, target)
+    await context.bot.send_message(
+        chat_id=destination,
+        text=_sunday_file_summary(rows, target, "📥 SUNDAY 2:00 PM · MONDAY FILE ARRIVAL"),
+    )
+    for row in rows:
+        if str(row.get("status") or "").upper() == "BROUGHT":
+            continue
+        await context.bot.send_message(
+            chat_id=destination,
+            text=(
+                f"📁 {row.get('case_number') or '-'}\n"
+                f"{row.get('case_title') or ''}\n"
+                f"Current status: {row.get('status') or 'SELECTED'}"
+            ),
+            reply_markup=file_status_keyboard(row),
+        )
+
+
+async def sunday_missing_files_escalation_job(context):
+    now = datetime.now(IST)
+    if now.weekday() != 6:
+        return
+    destination = _sunday_destination()
+    if not destination:
+        return
+    target = now.date() + timedelta(days=1)
+    rows = await asyncio.to_thread(file_assignments, target)
+    if any(str(row.get("status") or "").upper() != "BROUGHT" for row in rows):
+        await context.bot.send_message(
+            chat_id=destination,
+            text=_sunday_file_summary(rows, target, "🚨 SUNDAY 5:15 PM · MISSING MONDAY FILES"),
+        )
+
+
+async def sunday_final_file_readiness_job(context):
+    now = datetime.now(IST)
+    if now.weekday() != 6:
+        return
+    destination = _sunday_destination()
+    if not destination:
+        return
+    target = now.date() + timedelta(days=1)
+    rows = await asyncio.to_thread(file_assignments, target)
+    await context.bot.send_message(
+        chat_id=destination,
+        text=_sunday_file_summary(
+            rows, target, "📋 SUNDAY 5:45 PM · FINAL MONDAY READINESS", final=True
+        ),
+    )

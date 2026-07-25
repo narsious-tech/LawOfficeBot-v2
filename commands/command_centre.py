@@ -88,6 +88,8 @@ ITEMS = (
     MenuItem("casefolder", "☁️ Drive Folder", "casefolder", "Create or open a case folder.", "documents", "supervisor", False, "/casefolder CASE_NUMBER"),
     MenuItem("filesready", "✅ Files Ready", "filesready", "Tomorrow's physical-file readiness.", "documents", "supervisor"),
 
+    MenuItem("eveningdashboard", "🌆 Evening File Plan", "eveningdashboard", "Calendar-aware next-court-day file selection.", "documents", "supervisor"),
+
     # Staff
     MenuItem("checkin", "🟢 Check In", "checkin", "Open attendance check-in.", "staff"),
     MenuItem("checkout", "🔴 Check Out", "checkout", "Record attendance checkout.", "staff"),

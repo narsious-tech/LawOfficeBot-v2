@@ -17,6 +17,9 @@ from services.case_intelligence_service import (
     staff_telegram_id,
     todays_next_dates,
 )
+from services.office_calendar_service import is_evening_office_open
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 async def _send(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
@@ -37,6 +40,9 @@ async def nextdateslist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def physical_file_next_dates_job(context: ContextTypes.DEFAULT_TYPE):
+    if not is_evening_office_open(datetime.now(ZoneInfo("Asia/Kolkata")).date()):
+        print("PHYSICAL FILE NEXT-DATES SKIPPED: evening office is closed")
+        return
     updated = todays_next_dates()
     try:
         pending = advocate_diaries_pending_cases()
