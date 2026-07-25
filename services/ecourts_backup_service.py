@@ -775,6 +775,12 @@ def synchronize_backups(actor_id: int | None = None) -> dict[str, Any]:
             "change_count": len(detected_changes),
             "changes": detected_changes,
         })
+        # Compare-only verification phase. Staff dates remain operational until
+        # an administrator explicitly accepts a fresh eCourts conflict.
+        from services.ecourts_date_verification_service import (
+            reconcile_date_verifications,
+        )
+        result["date_verification"] = reconcile_date_verifications(run_id)
         return result
     except Exception as exc:
         conn.rollback()
@@ -956,7 +962,7 @@ def review_ecourts_change(
                 raise ValueError("This eCourts record is not linked to an Office OS case.")
             columns = _case_columns(cur)
             candidates = {
-                "next_hearing_date": ("next_hearing", "hearing_date"),
+                "next_hearing_date": (),
                 "purpose_name": ("next_purpose",),
                 "disposal_name": ("status",),
             }.get(item["field_name"], ())
@@ -1139,7 +1145,7 @@ def review_ecourts_change_group(
         else:
             columns = _case_columns(cur)
             mappings = {
-                "next_hearing_date": ("next_hearing", "hearing_date"),
+                "next_hearing_date": (),
                 "last_hearing_date": ("last_hearing_date", "last_hearing"),
                 "purpose_name": ("next_purpose",),
                 "disposal_name": ("status",),
