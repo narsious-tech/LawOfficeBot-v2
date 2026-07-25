@@ -207,8 +207,15 @@ async def _send_date_conflict(message) -> None:
 async def ecourtsdatecheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _authorize(update):
         return
-    await asyncio.to_thread(reconcile_date_verifications, None)
-    await _send_date_conflict(update.effective_message)
+    try:
+        await asyncio.to_thread(reconcile_date_verifications, None)
+        await _send_date_conflict(update.effective_message)
+    except Exception as exc:
+        logger.exception("eCourts date verification failed")
+        await update.effective_message.reply_text(
+            "❌ Date verification could not be completed safely.\n"
+            f"Reason: {type(exc).__name__}: {str(exc)[:500]}"
+        )
 
 
 async def syncecourts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -942,8 +949,15 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[1] if len(parts) > 1 else "home"
     page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
     if action == "datecheck":
-        await asyncio.to_thread(reconcile_date_verifications, None)
-        await _send_date_conflict(query.message)
+        try:
+            await asyncio.to_thread(reconcile_date_verifications, None)
+            await _send_date_conflict(query.message)
+        except Exception as exc:
+            logger.exception("eCourts date verification callback failed")
+            await query.message.reply_text(
+                "❌ Date verification could not be completed safely.\n"
+                f"Reason: {type(exc).__name__}: {str(exc)[:500]}"
+            )
         return
     if action in {"dateaccept", "datekeep", "datelater"}:
         if len(parts) < 3 or not parts[2].isdigit():
