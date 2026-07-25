@@ -21,6 +21,7 @@ from services.office_calendar_service import (
     scheduled_evening_plan,
     working_saturday_monday_plan,
 )
+from services.staff_motivation_service import daily_quote
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -361,7 +362,9 @@ async def send_evening_dashboard(
         f"⚖️ Hearings: {total}\n"
         f"🔗 Cause-list source: Advocate Diaries {source}\n\n"
         "Select only the files that must be brought to the evening office. "
-        "The final selected list will be sent to Preet, Priya, Happy and Jimmy."
+        "The final selected list will be sent to Preet, Priya, Happy and Jimmy.\n\n"
+        "🌙 EVENING REFLECTION\n"
+        f"{daily_quote(datetime.now(IST).date(), 'evening')}"
     )
     await context.bot.send_message(chat_id=destination, text=text)
     await context.bot.send_message(chat_id=destination, text=_physical_file_text(groups, target))

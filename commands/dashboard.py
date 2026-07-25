@@ -16,6 +16,7 @@ from services.office_calendar_service import (
     is_morning_office_open,
     morning_closure_message,
 )
+from services.staff_motivation_service import build_staff_motivation, daily_quote
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -1567,6 +1568,7 @@ async def morningdashboard(
             if is_morning_office_open(today)
             else morning_closure_message(today)
         )
+        message += "\n\n🌟 MORNING THOUGHT\n" + daily_quote(today, "morning")
 
         await send_dashboard_message(
             context,
@@ -1597,6 +1599,7 @@ async def morning_dashboard_job(context):
             if is_morning_office_open(today)
             else morning_closure_message(today)
         )
+        message += "\n\n🌟 MORNING THOUGHT\n" + daily_quote(today, "morning")
 
         await send_dashboard_message(
             context,
@@ -1995,8 +1998,14 @@ def build_staff_morning_briefs():
                 ])
 
         message += (
-            "Use /mytasks to view all "
-            "pending tasks."
+            "\n"
+            + build_staff_motivation(
+                staff_name,
+                unique_tasks,
+                today,
+                phase="morning",
+            )
+            + "\n\nUse /mytasks to view all pending tasks."
         )
 
         briefs.append({
@@ -2004,6 +2013,9 @@ def build_staff_morning_briefs():
                 "telegram_user_id"
             ],
             "staff_name": staff_name,
+            "tasks": unique_tasks,
+            "overdue_count": overdue_count,
+            "due_today_count": due_today_count,
             "message": message,
             "reply_markup": (
                 InlineKeyboardMarkup(
@@ -2015,6 +2027,76 @@ def build_staff_morning_briefs():
         })
 
     return briefs
+
+
+def build_staff_evening_boards():
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    boards = []
+    for brief in build_staff_morning_briefs():
+        tasks = brief.get("tasks") or []
+        boards.append({
+            "telegram_user_id": brief["telegram_user_id"],
+            "staff_name": brief["staff_name"],
+            "message": (
+                "📊 YOUR PRIVATE DAY-CLOSING BOARD\n"
+                f"👤 {brief['staff_name'].upper()}\n"
+                f"📅 {today.strftime('%d-%m-%Y')}\n\n"
+                f"📋 Pending: {len(tasks)}\n"
+                f"🔴 Overdue: {brief.get('overdue_count', 0)}\n"
+                f"🟠 Due today: {brief.get('due_today_count', 0)}\n\n"
+                + build_staff_motivation(
+                    brief["staff_name"], tasks, today, phase="evening"
+                )
+                + "\n\nUse /mytasks to review or complete pending work."
+            ),
+            "reply_markup": brief.get("reply_markup"),
+        })
+    return boards
+
+
+async def staff_evening_accountability_job(context, force=False):
+    from services.office_calendar_service import is_evening_office_open
+
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    if not force and not is_evening_office_open(today):
+        print("STAFF EVENING ACCOUNTABILITY SKIPPED: evening office is closed")
+        return
+
+    sent_count = 0
+    failed_count = 0
+    for board in build_staff_evening_boards():
+        try:
+            await send_staff_brief_message(
+                context=context,
+                chat_id=board["telegram_user_id"],
+                message=board["message"],
+                reply_markup=board.get("reply_markup"),
+            )
+            sent_count += 1
+        except Exception as exc:
+            failed_count += 1
+            print(
+                "STAFF EVENING ACCOUNTABILITY FAILED "
+                f"{board['staff_name']}: {type(exc).__name__}: {exc}"
+            )
+
+    print(
+        "STAFF EVENING ACCOUNTABILITY COMPLETED: "
+        f"sent={sent_count}, failed={failed_count}"
+    )
+
+
+async def test_staff_evening_accountability(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await update.effective_message.reply_text(
+        "⏳ Sending the private evening accountability boards..."
+    )
+    await staff_evening_accountability_job(context, force=True)
+    await update.effective_message.reply_text(
+        "✅ Test completed. Linked staff should check their private bot chats."
+    )
     
 async def staff_morning_brief_job(context):
     today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
