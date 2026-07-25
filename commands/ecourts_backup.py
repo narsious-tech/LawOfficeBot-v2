@@ -38,6 +38,13 @@ from services.ecourts_orchestration_service import (
     review_work_proposal,
     sync_approved_case_to_ad,
 )
+from services.ecourts_date_verification_service import (
+    list_date_conflicts,
+    mark_conflicts_alerted,
+    reconcile_date_verifications,
+    review_date_conflict,
+    verification_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +93,7 @@ async def _authorize(update: Update) -> bool:
 
 def _keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Verify Staff Dates", callback_data="ecr:datecheck")],
         [InlineKeyboardButton("🔄 Synchronize Backups", callback_data="ecr:sync")],
         [InlineKeyboardButton("🛡 Pending Change Review", callback_data="ecr:review")],
         [
@@ -136,6 +144,71 @@ async def ecourts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         _summary(data), parse_mode=ParseMode.HTML, reply_markup=_keyboard()
     )
+
+
+def _date_conflict_text(item: dict) -> str:
+    return (
+        "⚠️ <b>NEXT-DATE CONFLICT — ADMIN DECISION</b>\n\n"
+        f"Case: <b>{html.escape(str(item.get('display_case_number') or '-'))}</b>\n"
+        f"CNR: <code>{html.escape(str(item.get('cino') or '-'))}</code>\n\n"
+        f"👥 Staff / Advocate Diaries: "
+        f"<b>{html.escape(str(item.get('staff_next_date') or 'Not recorded'))}</b>\n"
+        f"⚖️ eCourts: "
+        f"<b>{html.escape(str(item.get('ecourts_next_date') or 'Not published'))}</b>\n"
+        f"📝 eCourts purpose: "
+        f"<b>{html.escape(str(item.get('ecourts_purpose') or 'Not supplied'))}</b>\n\n"
+        "Nothing changes until you choose. Accepting eCourts updates Office OS "
+        "and sends the correction to Advocate Diaries. Keeping the staff date "
+        "leaves both systems unchanged."
+    )
+
+
+def _date_conflict_keyboard(item: dict) -> InlineKeyboardMarkup:
+    verification_id = int(item["id"])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ Accept eCourts Date",
+                callback_data=f"ecr:dateaccept:{verification_id}",
+            ),
+            InlineKeyboardButton(
+                "👥 Keep Staff Date",
+                callback_data=f"ecr:datekeep:{verification_id}",
+            ),
+        ],
+        [InlineKeyboardButton(
+            "⏳ Review Later", callback_data=f"ecr:datelater:{verification_id}"
+        )],
+        [InlineKeyboardButton("⬅️ eCourts Dashboard", callback_data="ecr:home")],
+    ])
+
+
+async def _send_date_conflict(message) -> None:
+    items = await asyncio.to_thread(list_date_conflicts, 1, False)
+    if not items:
+        summary = await asyncio.to_thread(verification_summary)
+        await message.reply_text(
+            "✅ <b>eCOURTS DATE VERIFICATION</b>\n\n"
+            "No next-date conflict awaits your decision.\n"
+            f"Verified: <b>{summary.get('verified', 0)}</b>\n"
+            f"Awaiting eCourts: <b>{summary.get('awaiting_ecourts', 0)}</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=_keyboard(),
+        )
+        return
+    item = items[0]
+    await message.reply_text(
+        _date_conflict_text(item),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_date_conflict_keyboard(item),
+    )
+
+
+async def ecourtsdatecheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    await asyncio.to_thread(reconcile_date_verifications, None)
+    await _send_date_conflict(update.effective_message)
 
 
 async def syncecourts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -779,6 +852,30 @@ async def ecourtswork(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_work_proposal(update.effective_message)
 
 
+async def _alert_date_conflicts(context: ContextTypes.DEFAULT_TYPE) -> None:
+    items = await asyncio.to_thread(list_date_conflicts, 25, True)
+    if not items:
+        return
+    alerted: list[int] = []
+    for item in items:
+        delivered = False
+        for destination in _admin_destinations():
+            try:
+                await context.bot.send_message(
+                    chat_id=destination,
+                    text=_date_conflict_text(item),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_date_conflict_keyboard(item),
+                )
+                delivered = True
+            except Exception:
+                logger.exception("Could not deliver eCourts date-conflict alert")
+        if delivered:
+            alerted.append(int(item["id"]))
+    if alerted:
+        await asyncio.to_thread(mark_conflicts_alerted, alerted)
+
+
 async def _alert_changes(context: ContextTypes.DEFAULT_TYPE) -> None:
     groups = await asyncio.to_thread(
         list_ecourts_change_groups, 100, "PENDING", True
@@ -844,6 +941,59 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = (query.data or "").split(":")
     action = parts[1] if len(parts) > 1 else "home"
     page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+    if action == "datecheck":
+        await asyncio.to_thread(reconcile_date_verifications, None)
+        await _send_date_conflict(query.message)
+        return
+    if action in {"dateaccept", "datekeep", "datelater"}:
+        if len(parts) < 3 or not parts[2].isdigit():
+            await query.message.reply_text("❌ Invalid date-verification reference.")
+            return
+        decision = {
+            "dateaccept": "ACCEPT_ECOURTS",
+            "datekeep": "KEEP_STAFF",
+            "datelater": "REVIEW_LATER",
+        }[action]
+        try:
+            result = await asyncio.to_thread(
+                review_date_conflict,
+                int(parts[2]),
+                decision,
+                update.effective_user.id,
+            )
+            ad_status = str(result.get("ad_sync_status") or "NOT_REQUIRED")
+            if decision == "ACCEPT_ECOURTS":
+                integration = (
+                    "\nAdvocate Diaries: "
+                    f"<b>{html.escape(ad_status)}</b>\n"
+                    f"{html.escape(str(result.get('ad_sync_message') or ''))}\n"
+                    f"Old reminders cancelled: "
+                    f"<b>{int(result.get('reminders_cancelled') or 0)}</b>\n"
+                    f"Old unsent file selections removed: "
+                    f"<b>{int(result.get('file_selections_removed') or 0)}</b>"
+                )
+            elif decision == "KEEP_STAFF":
+                integration = (
+                    "\nOffice OS and Advocate Diaries retain the staff date."
+                )
+            else:
+                integration = "\nThe conflict remains queued for later review."
+            await query.edit_message_text(
+                "✅ <b>DATE DECISION RECORDED</b>\n\n"
+                f"Case: <b>{html.escape(str(result.get('display_case_number') or '-'))}</b>\n"
+                f"Decision: <b>{html.escape(decision)}</b>\n"
+                f"{html.escape(str(result.get('message') or 'Recorded.'))}"
+                f"{integration}",
+                parse_mode=ParseMode.HTML,
+            )
+            if decision != "REVIEW_LATER":
+                await _send_date_conflict(query.message)
+        except Exception as exc:
+            await query.message.reply_text(
+                f"❌ Date decision failed safely: {html.escape(str(exc))}",
+                parse_mode=ParseMode.HTML,
+            )
+        return
     if action == "close":
         await query.edit_message_text("eCourts reconciliation closed.")
         return
@@ -914,6 +1064,7 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if (
                 action == "groupapprove"
                 and result.get("review_status") != "ALREADY_REVIEWED"
+                and "next_hearing_date" in (result.get("applied_fields") or [])
             ):
                 ad_sync = await asyncio.to_thread(
                     sync_approved_case_to_ad,
@@ -1135,6 +1286,7 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ecourts_backup_sync_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         await asyncio.to_thread(synchronize_backups, None)
+        await _alert_date_conflicts(context)
         await _alert_changes(context)
     except Exception:
         logger.exception("Scheduled eCourts backup synchronization failed")
@@ -1214,4 +1366,5 @@ def register_ecourts_handlers(app) -> None:
     app.add_handler(CommandHandler("ecourtsorders", ecourtsorders))
     app.add_handler(CommandHandler("syncecourtsorders", syncecourtsorders))
     app.add_handler(CommandHandler("ecourtswork", ecourtswork))
+    app.add_handler(CommandHandler("ecourtsdatecheck", ecourtsdatecheck))
     app.add_handler(CallbackQueryHandler(ecourts_callback, pattern=r"^ecr:"))

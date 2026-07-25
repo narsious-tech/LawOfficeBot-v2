@@ -55,6 +55,7 @@ ITEMS = (
     MenuItem("readiness", "🧭 Hearing Readiness", "readiness", "Preparation and file readiness.", "court"),
     MenuItem("causepdf", "🖨 Printable Cause List", "printablecauselist", "Printable cause-list output.", "court", "supervisor"),
     MenuItem("ecourts", "🏛 eCourts Desk", "ecourts", "Reconciliation, orders and review queues.", "court", "admin"),
+    MenuItem("ecdatecheck", "📅 Verify Hearing Dates", "ecourtsdatecheck", "Compare staff dates with delayed eCourts updates.", "court", "admin"),
     MenuItem("ecwork", "🤖 eCourts AI Work", "ecourtswork", "AI work proposals awaiting approval.", "court", "admin"),
 
     # Cases and clients
