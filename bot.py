@@ -123,7 +123,9 @@ from commands.dashboard import (
     morning_dashboard_callback,
     morning_dashboard_job,
     staff_morning_brief_job,
+    staff_evening_accountability_job,
     test_staff_morning_briefs,
+    test_staff_evening_accountability,
     fetch_advocate_diaries_cause_groups,
     normalize_space,
 )
@@ -3839,6 +3841,12 @@ app.add_handler(
         test_staff_morning_briefs
     )
 )
+app.add_handler(
+    CommandHandler(
+        "teststaffclosing",
+        test_staff_evening_accountability
+    )
+)
 
 app.add_handler(
     CallbackQueryHandler(
@@ -4194,6 +4202,16 @@ app.job_queue.run_daily(
         )
     ),
     name="staff_morning_briefs_910am"
+)
+
+app.job_queue.run_daily(
+    staff_evening_accountability_job,
+    time=time(
+        hour=17,
+        minute=30,
+        tzinfo=ZoneInfo("Asia/Kolkata")
+    ),
+    name="staff_evening_accountability_530pm"
 )
 
 
