@@ -88,6 +88,7 @@ def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, in
         "conflicts": 0,
         "awaiting_ecourts": 0,
         "no_staff_date": 0,
+        "historical_stale": 0,
     }
     try:
         columns = _case_columns(cur)
@@ -129,6 +130,7 @@ def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, in
                 "DATE_CONFLICT": "conflicts",
                 "AWAITING_ECOURTS": "awaiting_ecourts",
                 "NO_STAFF_DATE": "no_staff_date",
+                "HISTORICAL_STALE": "historical_stale",
             }[status]
             counts[bucket] += 1
             cur.execute("""
