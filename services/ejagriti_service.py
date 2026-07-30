@@ -18,7 +18,15 @@ def _columns(cur, table: str) -> set[str]:
         "SELECT column_name FROM information_schema.columns "
         "WHERE table_schema='public' AND table_name=%s", (table,)
     )
-    return {row[0] for row in cur.fetchall()}
+    columns: set[str] = set()
+    for row in cur.fetchall():
+        # This helper is used with both ordinary cursors (tuple rows) and
+        # RealDictCursor (named rows). Numeric access on RealDictRow raises
+        # KeyError: 0 and previously broke /ejagritilink.
+        value = row.get("column_name") if hasattr(row, "get") else row[0]
+        if value:
+            columns.add(str(value))
+    return columns
 
 
 def ensure_schema() -> None:
