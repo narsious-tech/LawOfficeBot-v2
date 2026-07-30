@@ -208,6 +208,7 @@ from commands.mobile_update_queue import (
 
 from commands.live_hearings import livehearings, live_hearing_callback, hearing_completion_handler
 from services.ad_writeback import retry_pending as retry_ad_writebacks
+from services.ecourts_orchestration_service import retry_pending_ecourts_ad_syncs
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -223,10 +224,17 @@ async def advocate_diaries_writeback_retry_job(context):
     """Retry hearing updates that were saved locally while Advocate Diaries was unavailable."""
     try:
         stats = await asyncio.to_thread(retry_ad_writebacks, 20)
+        recovery = await asyncio.to_thread(retry_pending_ecourts_ad_syncs, 20)
         if stats.get("processed"):
             print(
                 "Advocate Diaries retry queue: "
                 f"processed={stats['processed']} success={stats['success']} failed={stats['failed']}"
+            )
+        if recovery.get("processed"):
+            print(
+                "eCourts-to-Advocate-Diaries recovery: "
+                f"processed={recovery['processed']} success={recovery['success']} "
+                f"pending={recovery['pending']}"
             )
     except Exception as exc:
         print(f"Advocate Diaries retry queue failed safely: {type(exc).__name__}: {exc}")
