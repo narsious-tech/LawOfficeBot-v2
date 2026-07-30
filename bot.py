@@ -201,6 +201,7 @@ from commands.ecourts_backup import (
     ecourts_daily_operations_job,
     ecourts_order_inbox_job,
 )
+from commands.ejagriti import register_ejagriti_handlers
 from commands.mobile_update_queue import (
     mobileupdatequeue,
     mobileupdatequeuesummary,
@@ -4061,6 +4062,9 @@ register_whatsapp_handlers(app)
 
 # Administrator-only eCourts backup reconciliation
 register_ecourts_handlers(app)
+
+# Administrator-only e-Jagriti consumer commission bridge
+register_ejagriti_handlers(app)
 
 app.job_queue.run_repeating(
     whatsapp_retry_job,
