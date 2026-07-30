@@ -70,6 +70,28 @@ def _norm_case_number(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]", "", (value or "").casefold())
 
 
+def _stored_remote_case_id(case_number: str) -> str | None:
+    """Recover an AD UUID for retry jobs created before the UUID was propagated."""
+    wanted = _norm_case_number(case_number)
+    if not wanted:
+        return None
+    conn = _connect()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT COALESCE(case_number, case_id), ad_case_id
+            FROM cases
+            WHERE NULLIF(TRIM(COALESCE(ad_case_id, '')), '') IS NOT NULL
+        """)
+        for stored_number, remote_id in cur.fetchall():
+            if _norm_case_number(stored_number) == wanted:
+                return str(remote_id).strip() or None
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+
 def _extract_csrf(web: AdvocateWeb, html: str = "") -> str:
     """Extract CakePHP CSRF request token from page markup or the authenticated cookie jar."""
     soup = BeautifulSoup(html or "", "lxml")
@@ -202,6 +224,7 @@ def writeback_hearing(
     *, live_hearing_id: int, case_number: str, hearing_date: date,
     next_date: date | None, next_purpose: str, order_summary: str, documents_required: str,
     remote_case_id: str | None = None, previous_hearing_date: str | None = None,
+    queue_on_failure: bool = True,
 ) -> WritebackResult:
     ensure_sync_queue()
     if next_date is None:
@@ -217,8 +240,22 @@ def writeback_hearing(
         "work": documents_required,
     }
     try:
-        found_id, record, csrf = find_remote_case(web, case_number, hearing_date)
-        remote_id = remote_case_id or found_id
+        if remote_case_id:
+            html, csrf = _load_day_page(web, hearing_date)
+            wanted = _norm_case_number(case_number)
+            record = next(
+                (
+                    candidate
+                    for candidate in _parse_day_cases(html)
+                    if _norm_case_number(candidate.get("case_number")) == wanted
+                ),
+                None,
+            )
+            remote_id = str(remote_case_id).strip()
+        else:
+            remote_id, record, csrf = find_remote_case(
+                web, case_number, hearing_date
+            )
         if not remote_id:
             raise RuntimeError(f"Matching Advocate Diaries case UUID not found on {hearing_date.isoformat()}")
         payload = _payload(
@@ -236,6 +273,12 @@ def writeback_hearing(
         return WritebackResult("SUCCESS", message, remote_case_id=remote_id,
                                endpoint=f"{BASE_URL}/hearings/add-dashboard-hearing", verified=verified)
     except Exception as exc:
+        if not queue_on_failure:
+            return WritebackResult(
+                "FAILED",
+                f"{type(exc).__name__}: {exc}",
+                remote_case_id=remote_case_id,
+            )
         qid = queue_writeback(live_hearing_id, case_number, provisional, f"{type(exc).__name__}: {exc}", remote_case_id)
         return WritebackResult("QUEUED", f"Advocate Diaries sync queued as #{qid}: {type(exc).__name__}: {exc}", remote_case_id=remote_case_id)
 
@@ -254,6 +297,7 @@ def retry_pending(limit: int = 20) -> dict[str, int]:
         for queue_id, live_id, case_number, remote_id, payload in rows:
             stats["processed"] += 1
             try:
+                remote_id = remote_id or _stored_remote_case_id(case_number)
                 case_date = date.fromisoformat(payload["case_date"])
                 next_date = date.fromisoformat(payload["next_hearing_date"])
                 result = writeback_hearing(
@@ -265,6 +309,7 @@ def retry_pending(limit: int = 20) -> dict[str, int]:
                     next_purpose=payload.get("purpose", ""),
                     order_summary=payload.get("remarks", ""),
                     documents_required=payload.get("work", ""),
+                    queue_on_failure=False,
                 )
                 if result.status != "SUCCESS":
                     raise RuntimeError(result.message)

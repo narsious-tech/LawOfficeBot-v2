@@ -112,9 +112,12 @@ def sync_approved_case_to_ad(
             SELECT q.id preparation_queue_id, q.local_case_pk, q.cino,
                    q.next_hearing_date, q.purpose_name,
                    COALESCE(c.case_number, c.case_id) case_number,
-                   c.last_hearing_date, c.next_purpose
+                   c.last_hearing_date, c.next_purpose, c.ad_case_id,
+                   v.ecourts_last_date
             FROM ecourts_preparation_queue q
             JOIN cases c ON c.id::text=q.local_case_pk
+            LEFT JOIN ecourts_date_verifications v
+              ON v.local_case_pk=q.local_case_pk AND v.cino=q.cino
             WHERE q.source_sync_run_id=%s AND q.cino=%s
             ORDER BY q.id DESC LIMIT 1
         """, (int(sync_run_id), normalized_cino))
@@ -133,7 +136,10 @@ def sync_approved_case_to_ad(
                 "verified": existing["verified"],
                 "remote_case_id": existing["remote_case_id"],
             }
-        hearing_date = _as_date(data.get("last_hearing_date"))
+        hearing_date = (
+            _as_date(data.get("ecourts_last_date"))
+            or _as_date(data.get("last_hearing_date"))
+        )
         next_date = _as_date(data.get("next_hearing_date"))
         if not hearing_date or not next_date:
             status, message = "SKIPPED", "Approved update lacks a usable last or next hearing date."
@@ -162,6 +168,7 @@ def sync_approved_case_to_ad(
     result = writeback_hearing(
         live_hearing_id=0,
         case_number=str(data["case_number"]),
+        remote_case_id=str(data.get("ad_case_id") or "").strip() or None,
         hearing_date=hearing_date,
         next_date=next_date,
         next_purpose=str(data.get("purpose_name") or data.get("next_purpose") or ""),
