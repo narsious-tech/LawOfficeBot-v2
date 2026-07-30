@@ -191,7 +191,8 @@ async def _send_date_conflict(message) -> None:
             "✅ <b>eCOURTS DATE VERIFICATION</b>\n\n"
             "No next-date conflict awaits your decision.\n"
             f"Verified: <b>{summary.get('verified', 0)}</b>\n"
-            f"Awaiting eCourts: <b>{summary.get('awaiting_ecourts', 0)}</b>",
+            f"Awaiting eCourts: <b>{summary.get('awaiting_ecourts', 0)}</b>\n"
+            f"Historical records ignored: <b>{summary.get('historical_stale', 0)}</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=_keyboard(),
         )
