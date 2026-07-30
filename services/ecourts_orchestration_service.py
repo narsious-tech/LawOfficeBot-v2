@@ -113,7 +113,8 @@ def sync_approved_case_to_ad(
                    q.next_hearing_date, q.purpose_name,
                    COALESCE(c.case_number, c.case_id) case_number,
                    c.last_hearing_date, c.next_purpose, c.ad_case_id,
-                   v.ecourts_last_date
+                   v.ecourts_last_date, v.staff_last_date,
+                   v.ecourts_next_date
             FROM ecourts_preparation_queue q
             JOIN cases c ON c.id::text=q.local_case_pk
             LEFT JOIN ecourts_date_verifications v
@@ -138,9 +139,13 @@ def sync_approved_case_to_ad(
             }
         hearing_date = (
             _as_date(data.get("ecourts_last_date"))
+            or _as_date(data.get("staff_last_date"))
             or _as_date(data.get("last_hearing_date"))
         )
-        next_date = _as_date(data.get("next_hearing_date"))
+        next_date = (
+            _as_date(data.get("next_hearing_date"))
+            or _as_date(data.get("ecourts_next_date"))
+        )
         if not hearing_date or not next_date:
             status, message = "SKIPPED", "Approved update lacks a usable last or next hearing date."
             cur.execute("""
@@ -211,6 +216,44 @@ def sync_approved_case_to_ad(
         "status": result.status, "message": result.message,
         "verified": result.verified, "remote_case_id": result.remote_case_id,
     }
+
+
+def retry_pending_ecourts_ad_syncs(limit: int = 20) -> dict[str, int]:
+    """Recover accepted eCourts decisions whose AD hand-off was skipped/queued."""
+    ensure_orchestration_schema()
+    conn = _conn()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT DISTINCT q.source_sync_run_id, q.cino
+            FROM ecourts_ad_sync_events e
+            JOIN ecourts_preparation_queue q
+              ON q.id=e.preparation_queue_id
+            WHERE e.status IN ('SKIPPED','QUEUED','FAILED')
+            ORDER BY q.source_sync_run_id, q.cino
+            LIMIT %s
+        """, (int(limit),))
+        candidates = [dict(row) for row in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+
+    stats = {"processed": 0, "success": 0, "pending": 0}
+    for candidate in candidates:
+        stats["processed"] += 1
+        try:
+            result = sync_approved_case_to_ad(
+                int(candidate["source_sync_run_id"]),
+                str(candidate["cino"]),
+                0,
+            )
+            if result.get("status") in {"SUCCESS", "ALREADY_SYNCED"}:
+                stats["success"] += 1
+            else:
+                stats["pending"] += 1
+        except Exception:
+            stats["pending"] += 1
+    return stats
 
 
 def _admin_ai_user_id() -> int | None:
