@@ -207,6 +207,7 @@ from commands.mobile_update_queue import (
 )
 
 from commands.live_hearings import livehearings, live_hearing_callback, hearing_completion_handler
+from services.ad_writeback import retry_pending as retry_ad_writebacks
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -216,6 +217,21 @@ AD_PASSWORD = os.getenv("AD_PASSWORD")
 
 ACCESS_TOKEN = None
 REFRESH_TOKEN = None
+
+
+async def advocate_diaries_writeback_retry_job(context):
+    """Retry hearing updates that were saved locally while Advocate Diaries was unavailable."""
+    try:
+        stats = await asyncio.to_thread(retry_ad_writebacks, 20)
+        if stats.get("processed"):
+            print(
+                "Advocate Diaries retry queue: "
+                f"processed={stats['processed']} success={stats['success']} failed={stats['failed']}"
+            )
+    except Exception as exc:
+        print(f"Advocate Diaries retry queue failed safely: {type(exc).__name__}: {exc}")
+
+
 def ad_login():
     global ACCESS_TOKEN, REFRESH_TOKEN
 
@@ -4043,6 +4059,13 @@ app.job_queue.run_repeating(
     interval=600,
     first=90,
     name="whatsapp_cloud_retry_queue",
+)
+
+app.job_queue.run_repeating(
+    advocate_diaries_writeback_retry_job,
+    interval=1800,
+    first=120,
+    name="advocate_diaries_hearing_writeback_retry",
 )
 
 app.job_queue.run_repeating(
