@@ -81,6 +81,24 @@ def _case_columns(cur) -> set[str]:
     return columns
 
 
+def _consumer_case_clause(columns: set[str], alias: str = "c") -> str:
+    """Identify matters that belong to e-Jagriti, not ordinary eCourts."""
+    predicates = []
+    number_col = next((x for x in ("case_number", "case_id") if x in columns), None)
+    if number_col:
+        predicates.append(
+            f"UPPER(TRIM(COALESCE({alias}.{number_col}::text,''))) "
+            r"~ '^(CC|COMI)[/-]'"
+        )
+    for name in ("case_type", "type", "court", "court_name"):
+        if name in columns:
+            predicates.append(
+                f"UPPER(COALESCE({alias}.{name}::text,'')) LIKE ANY "
+                "(ARRAY['%CONSUMER%','%DCDRC%','%SCDRC%','%NCDRC%'])"
+            )
+    return f"({' OR '.join(predicates)})" if predicates else "FALSE"
+
+
 def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, int]:
     """Compare approved links. Never overwrite a staff-entered date."""
     ensure_date_verification_schema()
@@ -93,6 +111,7 @@ def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, in
         "no_staff_date": 0,
         "historical_stale": 0,
         "disposed_skipped": 0,
+        "consumer_routed": 0,
     }
     try:
         columns = _case_columns(cur)
@@ -132,6 +151,29 @@ def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, in
             (f"c.{name}" for name in ("case_number", "case_id") if name in columns),
             "c.id::text",
         )
+        consumer_clause = _consumer_case_clause(columns)
+        cur.execute(f"""
+            UPDATE ecourts_date_verifications v
+               SET verification_status='CONSUMER_EJAGRITI',
+                   status_message='Consumer commission matter routed to e-Jagriti.',
+                   alert_sent_at=NULL,
+                   review_decision=NULL,
+                   reviewed_by=NULL,
+                   reviewed_at=NULL,
+                   updated_at=NOW()
+              FROM cases c
+             WHERE c.id::text=v.local_case_pk
+               AND {consumer_clause}
+               AND v.verification_status <> 'CONSUMER_EJAGRITI'
+        """)
+        counts["consumer_routed"] = int(cur.rowcount)
+        if "next_date_verification_status" in columns:
+            cur.execute(f"""
+                UPDATE cases c
+                   SET next_date_verification_status='CONSUMER_EJAGRITI',
+                       next_date_verified_at=NULL
+                 WHERE {consumer_clause}
+            """)
         active_status_clause = (
             "AND UPPER(TRIM(COALESCE(c.status,'OPEN'))) "
             f"NOT IN ({_TERMINAL_STATUS_SQL})"
@@ -149,6 +191,7 @@ def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, in
             JOIN ecourts_backup_records b ON b.cino=l.cino
             WHERE l.link_status='APPROVED'
               {active_status_clause}
+              AND NOT ({consumer_clause})
               AND (%s IS NULL OR b.last_sync_run_id=%s)
         """, (sync_run_id, sync_run_id))
         rows = [dict(row) for row in cur.fetchall()]
