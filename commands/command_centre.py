@@ -58,6 +58,9 @@ ITEMS = (
     MenuItem("ecdatecheck", "📅 Verify Hearing Dates", "ecourtsdatecheck", "Compare staff dates with delayed eCourts updates.", "court", "admin"),
     MenuItem("ecwork", "🤖 eCourts AI Work", "ecourtswork", "AI work proposals awaiting approval.", "court", "admin"),
 
+    MenuItem("ejagriti", "🏛 e-Jagriti Desk", "ejagriti", "Consumer commission case verification and orders.", "court", "admin"),
+    MenuItem("ejagritireview", "🛡 e-Jagriti Review", "ejagritireview", "Review verified consumer-case date changes.", "court", "admin"),
+
     # Cases and clients
     MenuItem("findcase", "🔎 Find Case", "findcase", "Search by case, party or client.", "cases", direct=False, usage="/findcase CASE_OR_PARTY"),
     MenuItem("case", "⚖️ Case Details", "case", "Open a specific case.", "cases", direct=False, usage="/case CASE_NUMBER"),
