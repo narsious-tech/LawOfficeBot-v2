@@ -17,6 +17,9 @@ from ai.schema import ensure_ai_schema
 from ai.session_store import AISessionStore
 from config import DATABASE_URL
 
+_TERMINAL_CASE_STATUSES = ("DISPOSED", "CLOSED", "DECIDED", "ARCHIVED", "INACTIVE")
+_TERMINAL_STATUS_SQL = ",".join(f"'{value}'" for value in _TERMINAL_CASE_STATUSES)
+
 
 def _conn():
     return psycopg2.connect(
@@ -109,8 +112,14 @@ def _ad_write_safety_error(
     next_date: date | None,
     review_decision: str | None,
     verification_status: str | None,
+    case_status: str | None = None,
 ) -> tuple[str, str] | None:
     """Refuse unapproved or historical eCourts dates before any AD request."""
+    if str(case_status or "").strip().upper() in _TERMINAL_CASE_STATUSES:
+        return (
+            "DISPOSED_CASE_SKIPPED",
+            "Advocate Diaries write blocked: the case is disposed or closed.",
+        )
     if (
         str(review_decision or "").upper() != "ACCEPT_ECOURTS"
         or str(verification_status or "").upper() != "ECOURTS_ACCEPTED"
@@ -140,7 +149,7 @@ def sync_approved_case_to_ad(
             SELECT q.id preparation_queue_id, q.local_case_pk, q.cino,
                    q.next_hearing_date, q.purpose_name,
                    COALESCE(c.case_number, c.case_id) case_number,
-                   c.last_hearing_date, c.next_purpose, c.ad_case_id,
+                   c.last_hearing_date, c.next_purpose, c.ad_case_id, c.status case_status,
                    v.ecourts_last_date, v.staff_last_date,
                    v.ecourts_next_date, v.review_decision,
                    v.verification_status, v.reviewed_at
@@ -179,6 +188,7 @@ def sync_approved_case_to_ad(
             next_date=next_date,
             review_decision=data.get("review_decision"),
             verification_status=data.get("verification_status"),
+            case_status=data.get("case_status"),
         )
         if not hearing_date or not next_date or safety_error:
             if safety_error:
@@ -264,19 +274,22 @@ def retry_pending_ecourts_ad_syncs(limit: int = 20) -> dict[str, int]:
     conn = _conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cur.execute("""
+        cur.execute(f"""
             SELECT DISTINCT q.source_sync_run_id, q.cino
             FROM ecourts_ad_sync_events e
             JOIN ecourts_preparation_queue q
               ON q.id=e.preparation_queue_id
             JOIN ecourts_date_verifications v
               ON v.local_case_pk=q.local_case_pk AND v.cino=q.cino
+            JOIN cases c ON c.id::text=q.local_case_pk
             WHERE e.status IN ('SKIPPED','QUEUED','FAILED')
               AND v.review_decision='ACCEPT_ECOURTS'
               AND v.verification_status='ECOURTS_ACCEPTED'
               AND v.reviewed_at >= NOW() - INTERVAL '7 days'
               AND e.updated_at >= NOW() - INTERVAL '7 days'
               AND COALESCE(q.next_hearing_date,v.ecourts_next_date) >= CURRENT_DATE
+              AND UPPER(TRIM(COALESCE(c.status,'OPEN')))
+                  NOT IN ({_TERMINAL_STATUS_SQL})
             ORDER BY q.source_sync_run_id, q.cino
             LIMIT %s
         """, (int(limit),))

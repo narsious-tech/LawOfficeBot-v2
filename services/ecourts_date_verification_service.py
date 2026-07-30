@@ -12,6 +12,9 @@ from services.ecourts_backup_service import ensure_ecourts_schema
 from services.ecourts_date_rules import as_date as _as_date
 from services.ecourts_date_rules import classify_dates
 
+_TERMINAL_CASE_STATUSES = ("DISPOSED", "CLOSED", "DECIDED", "ARCHIVED", "INACTIVE")
+_TERMINAL_STATUS_SQL = ",".join(f"'{value}'" for value in _TERMINAL_CASE_STATUSES)
+
 
 def _conn():
     return psycopg2.connect(
@@ -89,9 +92,34 @@ def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, in
         "awaiting_ecourts": 0,
         "no_staff_date": 0,
         "historical_stale": 0,
+        "disposed_skipped": 0,
     }
     try:
         columns = _case_columns(cur)
+        if "status" in columns:
+            cur.execute(f"""
+                UPDATE ecourts_date_verifications v
+                   SET verification_status='DISPOSED_SKIPPED',
+                       status_message='Disposed/closed case excluded from date verification.',
+                       alert_sent_at=NULL,
+                       review_decision=NULL,
+                       reviewed_by=NULL,
+                       reviewed_at=NULL,
+                       updated_at=NOW()
+                  FROM cases c
+                 WHERE c.id::text=v.local_case_pk
+                   AND UPPER(TRIM(COALESCE(c.status,'')))
+                       IN ({_TERMINAL_STATUS_SQL})
+                   AND v.verification_status <> 'DISPOSED_SKIPPED'
+            """)
+            counts["disposed_skipped"] = int(cur.rowcount)
+            cur.execute(f"""
+                UPDATE cases
+                   SET next_date_verification_status='DISPOSED_SKIPPED',
+                       next_date_verified_at=NULL
+                 WHERE UPPER(TRIM(COALESCE(status,'')))
+                       IN ({_TERMINAL_STATUS_SQL})
+            """)
         next_expr = next(
             (f"c.{name}" for name in ("next_hearing", "hearing_date") if name in columns),
             "NULL",
@@ -104,6 +132,11 @@ def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, in
             (f"c.{name}" for name in ("case_number", "case_id") if name in columns),
             "c.id::text",
         )
+        active_status_clause = (
+            "AND UPPER(TRIM(COALESCE(c.status,'OPEN'))) "
+            f"NOT IN ({_TERMINAL_STATUS_SQL})"
+            if "status" in columns else ""
+        )
         cur.execute(f"""
             SELECT l.local_case_pk, l.cino, {case_expr} display_case_number,
                    {next_expr} staff_next_date, {last_expr} staff_last_date,
@@ -115,6 +148,7 @@ def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, in
             JOIN cases c ON c.id::text=l.local_case_pk
             JOIN ecourts_backup_records b ON b.cino=l.cino
             WHERE l.link_status='APPROVED'
+              {active_status_clause}
               AND (%s IS NULL OR b.last_sync_run_id=%s)
         """, (sync_run_id, sync_run_id))
         rows = [dict(row) for row in cur.fetchall()]
@@ -205,11 +239,14 @@ def list_date_conflicts(limit: int = 20, unalerted_only: bool = False) -> list[d
     conn = _conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cur.execute("""
-            SELECT * FROM ecourts_date_verifications
-            WHERE verification_status='DATE_CONFLICT'
+        cur.execute(f"""
+            SELECT v.* FROM ecourts_date_verifications v
+            JOIN cases c ON c.id::text=v.local_case_pk
+            WHERE v.verification_status='DATE_CONFLICT'
+              AND UPPER(TRIM(COALESCE(c.status,'OPEN')))
+                  NOT IN ({_TERMINAL_STATUS_SQL})
               AND (%s=FALSE OR alert_sent_at IS NULL)
-            ORDER BY updated_at, id LIMIT %s
+            ORDER BY v.updated_at, v.id LIMIT %s
         """, (bool(unalerted_only), max(1, min(int(limit), 100))))
         return [dict(row) for row in cur.fetchall()]
     finally:
