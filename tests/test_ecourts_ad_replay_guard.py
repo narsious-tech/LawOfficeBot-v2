@@ -28,3 +28,23 @@ def test_future_accepted_date_is_allowed():
         verification_status="ECOURTS_ACCEPTED",
     )
     assert result is None
+
+
+def test_disposed_case_is_never_written_to_advocate_diaries():
+    result = _ad_write_safety_error(
+        next_date=date(2099, 1, 1),
+        review_decision="ACCEPT_ECOURTS",
+        verification_status="ECOURTS_ACCEPTED",
+        case_status="Disposed",
+    )
+    assert result and result[0] == "DISPOSED_CASE_SKIPPED"
+
+
+def test_active_case_remains_eligible():
+    result = _ad_write_safety_error(
+        next_date=date(2099, 1, 1),
+        review_decision="ACCEPT_ECOURTS",
+        verification_status="ECOURTS_ACCEPTED",
+        case_status="Pending",
+    )
+    assert result is None
