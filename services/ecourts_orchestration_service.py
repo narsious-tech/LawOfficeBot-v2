@@ -6,6 +6,7 @@ import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor
@@ -99,6 +100,33 @@ def _as_date(value: Any) -> date | None:
     return None
 
 
+def _india_today() -> date:
+    return datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+
+def _ad_write_safety_error(
+    *,
+    next_date: date | None,
+    review_decision: str | None,
+    verification_status: str | None,
+) -> tuple[str, str] | None:
+    """Refuse unapproved or historical eCourts dates before any AD request."""
+    if (
+        str(review_decision or "").upper() != "ACCEPT_ECOURTS"
+        or str(verification_status or "").upper() != "ECOURTS_ACCEPTED"
+    ):
+        return (
+            "BLOCKED_NOT_APPROVED",
+            "Advocate Diaries write blocked: no valid administrator acceptance was found.",
+        )
+    if next_date and next_date < _india_today():
+        return (
+            "HISTORICAL_SKIPPED",
+            "Advocate Diaries write blocked: the proposed next hearing date is historical.",
+        )
+    return None
+
+
 def sync_approved_case_to_ad(
     sync_run_id: int, cino: str, actor_id: int
 ) -> dict[str, Any]:
@@ -114,7 +142,8 @@ def sync_approved_case_to_ad(
                    COALESCE(c.case_number, c.case_id) case_number,
                    c.last_hearing_date, c.next_purpose, c.ad_case_id,
                    v.ecourts_last_date, v.staff_last_date,
-                   v.ecourts_next_date
+                   v.ecourts_next_date, v.review_decision,
+                   v.verification_status, v.reviewed_at
             FROM ecourts_preparation_queue q
             JOIN cases c ON c.id::text=q.local_case_pk
             LEFT JOIN ecourts_date_verifications v
@@ -146,8 +175,19 @@ def sync_approved_case_to_ad(
             _as_date(data.get("next_hearing_date"))
             or _as_date(data.get("ecourts_next_date"))
         )
-        if not hearing_date or not next_date:
-            status, message = "SKIPPED", "Approved update lacks a usable last or next hearing date."
+        safety_error = _ad_write_safety_error(
+            next_date=next_date,
+            review_decision=data.get("review_decision"),
+            verification_status=data.get("verification_status"),
+        )
+        if not hearing_date or not next_date or safety_error:
+            if safety_error:
+                status, message = safety_error
+            else:
+                status, message = (
+                    "INVALID_DATE_SKIPPED",
+                    "Approved update lacks a usable last or next hearing date.",
+                )
             cur.execute("""
                 INSERT INTO ecourts_ad_sync_events (
                     preparation_queue_id,local_case_pk,cino,case_number,
@@ -219,7 +259,7 @@ def sync_approved_case_to_ad(
 
 
 def retry_pending_ecourts_ad_syncs(limit: int = 20) -> dict[str, int]:
-    """Recover accepted eCourts decisions whose AD hand-off was skipped/queued."""
+    """Recover only recent, approved, future-dated AD hand-offs."""
     ensure_orchestration_schema()
     conn = _conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -229,7 +269,14 @@ def retry_pending_ecourts_ad_syncs(limit: int = 20) -> dict[str, int]:
             FROM ecourts_ad_sync_events e
             JOIN ecourts_preparation_queue q
               ON q.id=e.preparation_queue_id
+            JOIN ecourts_date_verifications v
+              ON v.local_case_pk=q.local_case_pk AND v.cino=q.cino
             WHERE e.status IN ('SKIPPED','QUEUED','FAILED')
+              AND v.review_decision='ACCEPT_ECOURTS'
+              AND v.verification_status='ECOURTS_ACCEPTED'
+              AND v.reviewed_at >= NOW() - INTERVAL '7 days'
+              AND e.updated_at >= NOW() - INTERVAL '7 days'
+              AND COALESCE(q.next_hearing_date,v.ecourts_next_date) >= CURRENT_DATE
             ORDER BY q.source_sync_run_id, q.cino
             LIMIT %s
         """, (int(limit),))
