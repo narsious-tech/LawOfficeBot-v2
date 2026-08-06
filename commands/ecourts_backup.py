@@ -837,6 +837,7 @@ async def syncecourtsorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _work_proposal_text(item: dict) -> str:
     return (
         "🤖 <b>eCOURTS AI WORK PROPOSAL</b>\n\n"
+        f"Case Title: <b>{html.escape(str(item.get('case_title') or 'Not recorded'))}</b>\n"
         f"Case: <b>{html.escape(str(item.get('case_number') or '-'))}</b>\n"
         f"CNR: <code>{html.escape(str(item.get('cino') or '-'))}</code>\n"
         f"Assign to current owner: <b>{html.escape(str(item.get('assigned_to') or '-'))}</b>\n"
