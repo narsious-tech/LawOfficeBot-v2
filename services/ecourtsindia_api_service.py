@@ -261,34 +261,50 @@ def _backfill_cause_watch(target_date: str) -> int:
         if not cur.fetchone()[0]:
             return 0
         cur.execute("""
+            WITH candidates AS (
+                SELECT
+                    l.cino,
+                    COALESCE(l.local_case_number, c.case_number, c.case_id,
+                             b.display_case_number, h.case_number) AS case_number,
+                    h.hearing_date AS listing_date,
+                    h.source
+                FROM live_hearings h
+                JOIN ecourts_case_links l ON l.link_status='APPROVED'
+                LEFT JOIN cases c ON c.id::text=l.local_case_pk
+                LEFT JOIN ecourts_backup_records b ON b.cino=l.cino
+                WHERE h.hearing_date BETWEEN %s::date - (%s * INTERVAL '1 day') AND %s::date
+                  AND COALESCE(UPPER(TRIM(h.status)), 'LISTED') <> 'DISPOSED'
+                  AND COALESCE(h.source, '') IN ('PDF', 'API')
+                  AND COALESCE(UPPER(TRIM(c.status)), 'OPEN') NOT IN ('CLOSED','DISPOSED')
+                  AND NULLIF(TRIM(COALESCE(h.case_number,'')), '') IS NOT NULL
+                  AND (
+                        LOWER(REGEXP_REPLACE(COALESCE(h.case_number,''), '[^a-zA-Z0-9]', '', 'g')) =
+                        LOWER(REGEXP_REPLACE(COALESCE(l.local_case_number,''), '[^a-zA-Z0-9]', '', 'g'))
+                     OR LOWER(REGEXP_REPLACE(COALESCE(h.case_number,''), '[^a-zA-Z0-9]', '', 'g')) =
+                        LOWER(REGEXP_REPLACE(COALESCE(c.case_number,''), '[^a-zA-Z0-9]', '', 'g'))
+                     OR LOWER(REGEXP_REPLACE(COALESCE(h.case_number,''), '[^a-zA-Z0-9]', '', 'g')) =
+                        LOWER(REGEXP_REPLACE(COALESCE(c.case_id,''), '[^a-zA-Z0-9]', '', 'g'))
+                     OR LOWER(REGEXP_REPLACE(COALESCE(h.case_number,''), '[^a-zA-Z0-9]', '', 'g')) =
+                        LOWER(REGEXP_REPLACE(COALESCE(b.display_case_number,''), '[^a-zA-Z0-9]', '', 'g'))
+                  )
+            ), deduplicated AS (
+                SELECT
+                    cino,
+                    MAX(case_number) AS case_number,
+                    listing_date,
+                    MAX(source) AS source
+                FROM candidates
+                GROUP BY cino, listing_date
+            )
             INSERT INTO ecourts_api_cause_watch
                 (cino, case_number, listing_date, source, status)
-            SELECT DISTINCT
-                l.cino,
-                COALESCE(l.local_case_number, c.case_number, c.case_id,
-                         b.display_case_number, h.case_number),
-                h.hearing_date,
-                h.source,
+            SELECT
+                cino,
+                case_number,
+                listing_date,
+                source,
                 'WATCHING'
-            FROM live_hearings h
-            JOIN ecourts_case_links l ON l.link_status='APPROVED'
-            LEFT JOIN cases c ON c.id::text=l.local_case_pk
-            LEFT JOIN ecourts_backup_records b ON b.cino=l.cino
-            WHERE h.hearing_date BETWEEN %s::date - (%s * INTERVAL '1 day') AND %s::date
-              AND COALESCE(UPPER(TRIM(h.status)), 'LISTED') <> 'DISPOSED'
-              AND COALESCE(h.source, '') IN ('PDF', 'API')
-              AND COALESCE(UPPER(TRIM(c.status)), 'OPEN') NOT IN ('CLOSED','DISPOSED')
-              AND NULLIF(TRIM(COALESCE(h.case_number,'')), '') IS NOT NULL
-              AND (
-                    LOWER(REGEXP_REPLACE(COALESCE(h.case_number,''), '[^a-zA-Z0-9]', '', 'g')) =
-                    LOWER(REGEXP_REPLACE(COALESCE(l.local_case_number,''), '[^a-zA-Z0-9]', '', 'g'))
-                 OR LOWER(REGEXP_REPLACE(COALESCE(h.case_number,''), '[^a-zA-Z0-9]', '', 'g')) =
-                    LOWER(REGEXP_REPLACE(COALESCE(c.case_number,''), '[^a-zA-Z0-9]', '', 'g'))
-                 OR LOWER(REGEXP_REPLACE(COALESCE(h.case_number,''), '[^a-zA-Z0-9]', '', 'g')) =
-                    LOWER(REGEXP_REPLACE(COALESCE(c.case_id,''), '[^a-zA-Z0-9]', '', 'g'))
-                 OR LOWER(REGEXP_REPLACE(COALESCE(h.case_number,''), '[^a-zA-Z0-9]', '', 'g')) =
-                    LOWER(REGEXP_REPLACE(COALESCE(b.display_case_number,''), '[^a-zA-Z0-9]', '', 'g'))
-              )
+            FROM deduplicated
             ON CONFLICT (cino, listing_date) DO UPDATE SET
                 case_number=EXCLUDED.case_number, source=EXCLUDED.source,
                 updated_at=NOW()
