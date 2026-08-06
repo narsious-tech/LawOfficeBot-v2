@@ -81,6 +81,71 @@ def _case_columns(cur) -> set[str]:
     return columns
 
 
+def _case_key(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").casefold() if ch.isalnum())
+
+
+def _refresh_linked_ad_dates() -> int:
+    """Refresh linked Office OS dates from live Advocate Diaries case data.
+
+    This deliberately avoids the full client/Drive synchronization.  If the
+    live read fails, the caller fails closed rather than comparing eCourts to a
+    stale local date and generating a false conflict.
+    """
+    from services.ad_sync_v3 import fetch_all_cases, login, parse_case_payload
+
+    raw_cases = fetch_all_cases(login())
+    live_dates: dict[str, date] = {}
+    live_ids: dict[str, date] = {}
+    for raw in raw_cases:
+        parsed = parse_case_payload(raw)
+        next_date = _as_date(parsed.get("next_hearing"))
+        if not next_date:
+            continue
+        number_key = _case_key(parsed.get("case_number"))
+        ad_case_id = str(parsed.get("ad_case_id") or "").strip()
+        if number_key:
+            live_dates[number_key] = next_date
+        if ad_case_id:
+            live_ids[ad_case_id] = next_date
+
+    conn = _conn()
+    cur = conn.cursor()
+    updated = 0
+    try:
+        cur.execute("""
+            SELECT c.id::text, c.ad_case_id,
+                   COALESCE(c.case_number, c.case_id) case_number
+            FROM cases c
+            JOIN ecourts_case_links l
+              ON l.local_case_pk=c.id::text AND l.link_status='APPROVED'
+        """)
+        rows = cur.fetchall()
+        for local_case_pk, ad_case_id, case_number in rows:
+            next_date = live_ids.get(str(ad_case_id or "").strip())
+            if next_date is None:
+                next_date = live_dates.get(_case_key(case_number))
+            if next_date is None:
+                continue
+            cur.execute("""
+                UPDATE cases
+                   SET next_hearing=%s,
+                       ad_sync_status='MIRRORED',
+                       ad_sync_message='Live date refreshed before eCourts verification'
+                 WHERE id::text=%s
+                   AND next_hearing IS DISTINCT FROM %s
+            """, (next_date.isoformat(), str(local_case_pk), next_date.isoformat()))
+            updated += int(cur.rowcount)
+        conn.commit()
+        return updated
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
 def _consumer_case_clause(columns: set[str], alias: str = "c") -> str:
     """Identify matters that belong to e-Jagriti, not ordinary eCourts."""
     predicates = []
@@ -102,6 +167,7 @@ def _consumer_case_clause(columns: set[str], alias: str = "c") -> str:
 def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, int]:
     """Compare approved links. Never overwrite a staff-entered date."""
     ensure_date_verification_schema()
+    ad_dates_refreshed = _refresh_linked_ad_dates()
     conn = _conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     counts = {
@@ -112,6 +178,7 @@ def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, in
         "historical_stale": 0,
         "disposed_skipped": 0,
         "consumer_routed": 0,
+        "ad_dates_refreshed": ad_dates_refreshed,
     }
     try:
         columns = _case_columns(cur)

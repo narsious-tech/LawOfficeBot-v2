@@ -1,4 +1,5 @@
 """Pure date-comparison rules for eCourts verification."""
+import re
 from datetime import date, datetime
 from typing import Any
 
@@ -11,7 +12,15 @@ def as_date(value: Any) -> date | None:
     text = str(value or "").strip()
     if not text:
         return None
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%y"):
+    if re.match(r"^\d{4}-\d{2}-\d{2}", text):
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            pass
+    for fmt in (
+        "%d-%m-%Y", "%d/%m/%Y", "%d/%m/%y",
+        "%m/%d/%Y", "%m/%d/%y",
+    ):
         try:
             return datetime.strptime(text, fmt).date()
         except ValueError:
