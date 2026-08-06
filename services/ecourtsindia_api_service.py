@@ -114,7 +114,7 @@ def _compact_case_number(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").casefold())
 
 
-def _current_advocate_diaries_cases() -> tuple[list[str], int, str, str]:
+def _current_advocate_diaries_cases() -> tuple[list[str], int, int, str, str]:
     """Return exact case-number keys from today's live Advocate Diaries list.
 
     This intentionally reads the current source instead of the persistent live
@@ -124,13 +124,17 @@ def _current_advocate_diaries_cases() -> tuple[list[str], int, str, str]:
 
     today = datetime.now(IST).date()
     groups, source = fetch_advocate_diaries_cause_groups(today)
-    numbers = {
-        _compact_case_number(case.get("case_number"))
+    matters = [
+        case
         for group in groups or []
         for case in group.get("cases", []) or []
+    ]
+    numbers = {
+        _compact_case_number(case.get("case_number"))
+        for case in matters
         if _compact_case_number(case.get("case_number"))
     }
-    return sorted(numbers), len(numbers), str(source), today.isoformat()
+    return sorted(numbers), len(matters), len(numbers), str(source), today.isoformat()
 
 
 def _approved_cases(
@@ -241,6 +245,7 @@ def download_new_orders(
             "enabled": False, "cases_checked": 0, "orders_found": 0,
             "downloaded": 0, "failed": 0, "results": [],
             "cause_list_count": 0, "eligible_cases": 0,
+            "cause_list_total": 0,
             "cause_list_date": None, "cause_list_source": None,
         }
     ensure_api_schema()
@@ -254,7 +259,7 @@ def download_new_orders(
     max_downloads = max(1, min(int(max_orders), 25))
     results: list[dict[str, Any]] = []
     found = downloaded = failed = cases_checked = 0
-    current_numbers, cause_count, cause_source, cause_date = (
+    current_numbers, cause_total, cause_count, cause_source, cause_date = (
         _current_advocate_diaries_cases()
     )
     cases = _approved_cases(max_cases, current_numbers, force=force)
@@ -342,6 +347,7 @@ def download_new_orders(
             "cause_list_date": cause_date,
             "cause_list_source": cause_source,
             "cause_list_count": cause_count,
+            "cause_list_total": cause_total,
             "eligible_cases": len(cases),
             "cases_checked": cases_checked,
             "orders_found": found,
