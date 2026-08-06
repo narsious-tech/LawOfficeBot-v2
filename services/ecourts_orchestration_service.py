@@ -59,6 +59,7 @@ def ensure_orchestration_schema() -> None:
                 local_case_pk TEXT NOT NULL,
                 cino TEXT,
                 case_number TEXT NOT NULL,
+                case_title TEXT,
                 assigned_to TEXT NOT NULL,
                 title TEXT NOT NULL,
                 details TEXT,
@@ -72,6 +73,26 @@ def ensure_orchestration_schema() -> None:
                 reviewed_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
+        """)
+        cur.execute(
+            "ALTER TABLE ecourts_ai_work_proposals "
+            "ADD COLUMN IF NOT EXISTS case_title TEXT"
+        )
+        cur.execute("""
+            UPDATE ecourts_ai_work_proposals p
+               SET case_title=COALESCE(
+                   (SELECT NULLIF(TRIM(c.case_title), '')
+                      FROM cases c
+                     WHERE c.id::text=p.local_case_pk),
+                   (SELECT NULLIF(CONCAT_WS(
+                               ' vs ',
+                               NULLIF(TRIM(b.petitioner_name), ''),
+                               NULLIF(TRIM(b.respondent_name), '')
+                           ), '')
+                      FROM ecourts_backup_records b
+                     WHERE b.cino=p.cino)
+               )
+             WHERE NULLIF(TRIM(COALESCE(p.case_title, '')), '') IS NULL
         """)
         cur.execute(
             "ALTER TABLE case_works ADD COLUMN IF NOT EXISTS external_source_id TEXT"
@@ -354,9 +375,18 @@ def generate_order_work_proposals(limit: int = 10) -> list[dict[str, Any]]:
         cur.execute("""
             SELECT o.id order_inbox_id,o.local_case_pk,o.cino,o.case_number,
                    o.extracted_text,o.ai_summary,o.importance,
-                   c.next_hearing,c.hearing_date
+                   c.next_hearing,c.hearing_date,
+                   COALESCE(
+                       NULLIF(TRIM(c.case_title), ''),
+                       NULLIF(CONCAT_WS(
+                           ' vs ',
+                           NULLIF(TRIM(b.petitioner_name), ''),
+                           NULLIF(TRIM(b.respondent_name), '')
+                       ), '')
+                   ) case_title
             FROM ecourts_order_inbox o
             JOIN cases c ON c.id::text=o.local_case_pk
+            LEFT JOIN ecourts_backup_records b ON b.cino=o.cino
             LEFT JOIN ecourts_ai_work_proposals p ON p.order_inbox_id=o.id
             WHERE o.processing_status IN ('MATCHED','ARCHIVED')
               AND o.local_case_pk IS NOT NULL
@@ -402,7 +432,9 @@ def generate_order_work_proposals(limit: int = 10) -> list[dict[str, Any]]:
                 user_text=request,
                 feature="ecourts_work_proposal",
                 office_context=(
-                    f"CASE: {row['case_number']}\nCNR: {row.get('cino') or '-'}\n"
+                    f"CASE: {row['case_number']}\n"
+                    f"CASE TITLE: {row.get('case_title') or '-'}\n"
+                    f"CNR: {row.get('cino') or '-'}\n"
                     f"NEXT HEARING: {row.get('next_hearing') or row.get('hearing_date') or '-'}\n"
                     f"ORDER IMPORTANCE: {row.get('importance') or 'NORMAL'}\n"
                     f"EXISTING AI NOTE:\n{row.get('ai_summary') or '-'}\n"
@@ -433,14 +465,14 @@ def generate_order_work_proposals(limit: int = 10) -> list[dict[str, Any]]:
         try:
             cur.execute("""
                 INSERT INTO ecourts_ai_work_proposals (
-                    order_inbox_id,local_case_pk,cino,case_number,assigned_to,
+                    order_inbox_id,local_case_pk,cino,case_number,case_title,assigned_to,
                     title,details,priority,due_date,generation_mode,ai_raw_response
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (order_inbox_id) DO NOTHING
                 RETURNING *
             """, (
                 row["order_inbox_id"], row["local_case_pk"], row.get("cino"),
-                row["case_number"], owner,
+                row["case_number"], row.get("case_title"), owner,
                 str(proposal.get("title") or "Review interim order manually")[:500],
                 str(proposal.get("details") or proposal.get("reason") or "")[:10000],
                 priority, due, mode, raw[:20000],
