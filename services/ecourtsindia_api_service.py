@@ -10,8 +10,10 @@ import base64
 import io
 import os
 import re
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import psycopg2
 import requests
@@ -22,6 +24,7 @@ from utils.drive import get_drive_service
 
 
 BASE_URL = "https://webapi.ecourtsindia.com"
+IST = ZoneInfo("Asia/Kolkata")
 
 
 def _conn():
@@ -107,23 +110,64 @@ def _request(method: str, path: str, *, timeout: int = 90) -> dict[str, Any]:
     return payload
 
 
-def _approved_cases(limit: int, force: bool = False) -> list[tuple[str, str]]:
+def _compact_case_number(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").casefold())
+
+
+def _current_advocate_diaries_cases() -> tuple[list[str], int, str, str]:
+    """Return exact case-number keys from today's live Advocate Diaries list.
+
+    This intentionally reads the current source instead of the persistent live
+    hearing mirror, which can contain rows imported earlier in the day.
+    """
+    from commands.dashboard import fetch_advocate_diaries_cause_groups
+
+    today = datetime.now(IST).date()
+    groups, source = fetch_advocate_diaries_cause_groups(today)
+    numbers = {
+        _compact_case_number(case.get("case_number"))
+        for group in groups or []
+        for case in group.get("cases", []) or []
+        if _compact_case_number(case.get("case_number"))
+    }
+    return sorted(numbers), len(numbers), str(source), today.isoformat()
+
+
+def _approved_cases(
+    limit: int, current_case_numbers: list[str], force: bool = False
+) -> list[tuple[str, str]]:
+    if not current_case_numbers:
+        return []
     conn = _conn()
     cur = conn.cursor()
     try:
         refresh_hours = max(1, int(os.getenv("ECOURTSINDIA_CASE_CHECK_HOURS", "24")))
         cur.execute("""
-            SELECT DISTINCT l.cino, COALESCE(l.local_case_number, b.display_case_number, l.cino)
+            SELECT DISTINCT l.cino,
+                   COALESCE(l.local_case_number, c.case_number, c.case_id,
+                            b.display_case_number, l.cino)
             FROM ecourts_case_links l
             LEFT JOIN ecourts_backup_records b ON b.cino=l.cino
+            LEFT JOIN cases c ON c.id::text=l.local_case_pk
             LEFT JOIN ecourts_api_case_checks ck ON ck.cino=l.cino
             WHERE l.link_status='APPROVED'
               AND l.cino ~ '^[A-Z]{4}[0-9]{12}$'
+              AND COALESCE(UPPER(TRIM(c.status)), 'OPEN') NOT IN ('CLOSED','DISPOSED')
+              AND (
+                    LOWER(REGEXP_REPLACE(COALESCE(l.local_case_number,''), '[^a-zA-Z0-9]', '', 'g')) = ANY(%s)
+                 OR LOWER(REGEXP_REPLACE(COALESCE(c.case_number,''), '[^a-zA-Z0-9]', '', 'g')) = ANY(%s)
+                 OR LOWER(REGEXP_REPLACE(COALESCE(c.case_id,''), '[^a-zA-Z0-9]', '', 'g')) = ANY(%s)
+                 OR LOWER(REGEXP_REPLACE(COALESCE(b.display_case_number,''), '[^a-zA-Z0-9]', '', 'g')) = ANY(%s)
+              )
               AND (%s OR ck.checked_at IS NULL
                    OR ck.checked_at < NOW() - (%s * INTERVAL '1 hour'))
             ORDER BY l.cino
             LIMIT %s
-        """, (bool(force), refresh_hours, max(1, min(int(limit), 100))))
+        """, (
+            current_case_numbers, current_case_numbers,
+            current_case_numbers, current_case_numbers,
+            bool(force), refresh_hours, max(1, min(int(limit), 100)),
+        ))
         return [(str(row[0]), str(row[1])) for row in cur.fetchall()]
     finally:
         cur.close()
@@ -196,6 +240,8 @@ def download_new_orders(
         return {
             "enabled": False, "cases_checked": 0, "orders_found": 0,
             "downloaded": 0, "failed": 0, "results": [],
+            "cause_list_count": 0, "eligible_cases": 0,
+            "cause_list_date": None, "cause_list_source": None,
         }
     ensure_api_schema()
     # Imported lazily to avoid a circular dependency at module import time.
@@ -208,7 +254,10 @@ def download_new_orders(
     max_downloads = max(1, min(int(max_orders), 25))
     results: list[dict[str, Any]] = []
     found = downloaded = failed = cases_checked = 0
-    cases = _approved_cases(max_cases, force=force)
+    current_numbers, cause_count, cause_source, cause_date = (
+        _current_advocate_diaries_cases()
+    )
+    cases = _approved_cases(max_cases, current_numbers, force=force)
     conn = _conn()
     cur = conn.cursor()
     try:
@@ -290,6 +339,10 @@ def download_new_orders(
                     })
         return {
             "enabled": True,
+            "cause_list_date": cause_date,
+            "cause_list_source": cause_source,
+            "cause_list_count": cause_count,
+            "eligible_cases": len(cases),
             "cases_checked": cases_checked,
             "orders_found": found,
             "downloaded": downloaded,
