@@ -217,47 +217,86 @@ def parse_day_cases_pdf_text(text):
     return groups
 
 
+def _deep_api_value(value, keys, depth=0):
+    """Find the first nonblank named value in a bounded API object tree."""
+    if depth > 4:
+        return ""
+    if isinstance(value, dict):
+        for key in keys:
+            candidate = value.get(key)
+            if candidate is not None and not isinstance(candidate, (dict, list)):
+                text = normalize_space(str(candidate))
+                if text:
+                    return text
+        for candidate in value.values():
+            if isinstance(candidate, (dict, list)):
+                found = _deep_api_value(candidate, keys, depth + 1)
+                if found:
+                    return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = _deep_api_value(candidate, keys, depth + 1)
+            if found:
+                return found
+    return ""
+
+
+def _leading_case_number(value):
+    """Split a recognized court case number from the start of display text."""
+    tokens = normalize_space(value).split()
+    for token_count in range(1, min(len(tokens), 4) + 1):
+        candidate = " ".join(tokens[:token_count]).strip(" ,;:-")
+        if not any(ch.isdigit() for ch in candidate):
+            continue
+        if not re.search(r"(?:/|-)\d{4}$", candidate):
+            continue
+        if "/" not in candidate and candidate.count("-") < 2:
+            continue
+        remainder = normalize_space(" ".join(tokens[token_count:])).lstrip("-: ")
+        return candidate, remainder
+    return "", normalize_space(value)
+
+
 def _normalize_api_case(case_item):
     case_item = case_item if isinstance(case_item, dict) else {}
 
-    case_number = normalize_space(
-        case_item.get("case_number")
-        or case_item.get("case_no")
-        or case_item.get("registration_number")
-        or case_item.get("number")
-        or ""
+    case_number = normalize_space(str(case_item.get("number") or "")) or _deep_api_value(
+        case_item,
+        (
+            "case_number", "case_no", "registration_number",
+            "caseNumber", "caseNo", "registrationNumber",
+            "display_case_number", "case_number_display",
+        ),
     )
-    petitioner = normalize_space(
-        case_item.get("petitioner")
-        or case_item.get("case_title_petitioner")
-        or case_item.get("client_name")
-        or ""
+    petitioner = _deep_api_value(
+        case_item,
+        ("petitioner", "case_title_petitioner", "client_name", "petitioner_name"),
     )
-    respondent = normalize_space(
-        case_item.get("respondent")
-        or case_item.get("case_title_respondent")
-        or case_item.get("verses_name")
-        or ""
+    respondent = _deep_api_value(
+        case_item,
+        ("respondent", "case_title_respondent", "verses_name", "respondent_name"),
     )
-    case_title = normalize_space(
-        case_item.get("case_title")
-        or case_item.get("title")
-        or (f"{petitioner} vs {respondent}" if petitioner and respondent else petitioner or respondent)
+    case_title = _deep_api_value(
+        case_item,
+        ("case_title", "title", "caseTitle", "display_title"),
     )
+    if not case_title:
+        case_title = f"{petitioner} vs {respondent}" if petitioner and respondent else petitioner or respondent
+    if not case_number and case_title:
+        case_number, recovered_title = _leading_case_number(case_title)
+        if case_number and recovered_title:
+            case_title = recovered_title
 
     return {
         "case_number": case_number,
         "case_title": case_title,
-        "previous_date": normalize_space(
-            case_item.get("previous_date")
-            or case_item.get("last_date")
-            or ""
+        "previous_date": _deep_api_value(
+            case_item,
+            ("previous_date", "last_date", "previousDate", "lastHearingDate"),
         ),
-        "stage": normalize_space(
-            case_item.get("purpose")
-            or case_item.get("stage")
-            or case_item.get("next_date_purpose")
-            or ""
+        "stage": _deep_api_value(
+            case_item,
+            ("purpose", "stage", "next_date_purpose", "purpose_name", "nextPurpose"),
         ),
     }
 
