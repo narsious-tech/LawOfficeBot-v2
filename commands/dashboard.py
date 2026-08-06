@@ -155,12 +155,23 @@ def parse_case_line(line):
 
     tokens = body.split()
     case_number = ""
+    case_title = body
 
-    if tokens and "/" in tokens[0] and any(ch.isdigit() for ch in tokens[0]):
-        case_number = tokens[0]
-        case_title = normalize_space(body[len(tokens[0]):])
-    else:
-        case_title = body
+    # Advocate Diaries PDFs contain several court-number styles.  The old
+    # parser accepted only a one-token slash format (COMA/44712/2024), which
+    # silently discarded common High Court and multi-token formats such as
+    # CRM-M-40139-2019 and CS CJ/4270/2023.
+    for token_count in range(1, min(len(tokens), 4) + 1):
+        candidate = " ".join(tokens[:token_count]).strip(" ,;:")
+        if not any(ch.isdigit() for ch in candidate):
+            continue
+        if not re.search(r"(?:/|-)\d{4}$", candidate):
+            continue
+        if "/" not in candidate and candidate.count("-") < 2:
+            continue
+        case_number = candidate
+        case_title = normalize_space(" ".join(tokens[token_count:]))
+        break
 
     return {
         "case_number": case_number,

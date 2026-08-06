@@ -805,6 +805,7 @@ async def syncecourtsorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Order Inbox scan complete.\n\n"
             f"API enabled: {'Yes' if api_result['enabled'] else 'No'}\n"
             f"Advocate Diaries list: {api_result.get('cause_list_date') or '-'} "
+            f"via {api_result.get('cause_list_source') or '-'} "
             f"({api_result.get('cause_list_count', 0)} numbered matters)\n"
             f"Active CNR-linked matters eligible: {api_result.get('eligible_cases', 0)}\n"
             f"Approved CNRs checked: {api_result['cases_checked']}\n"
