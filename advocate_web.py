@@ -77,16 +77,47 @@ class AdvocateWeb:
 
 
     def get(self, path, params=None):
-
         self.ensure_login()
-
         response = self.session.get(
             f"{BASE_URL}{path}",
             params=params,
             allow_redirects=True
         )
 
+        # Advocate Diaries redirects an expired authenticated session to the
+        # login page and still returns HTTP 200.  Treating that response as the
+        # requested page made callers (notably /works) report an empty list.
+        # Re-authenticate once and repeat the original read request.
+        if self._is_login_response(response):
+            self.logged_in = False
+            self.login()
+            response = self.session.get(
+                f"{BASE_URL}{path}",
+                params=params,
+                allow_redirects=True
+            )
+
         return response
+
+
+    @staticmethod
+    def _is_login_response(response):
+        """Return True when a protected request ended on the login page."""
+        url = (getattr(response, "url", "") or "").lower()
+        if "/auth/login" in url:
+            return True
+
+        # Some deployments render the login form without changing the final
+        # URL, so also recognize its distinctive form fields.
+        content_type = (response.headers.get("Content-Type", "") or "").lower()
+        if "html" not in content_type:
+            return False
+        text = (getattr(response, "text", "") or "").lower()
+        return (
+            'name="email"' in text
+            and 'name="password"' in text
+            and ("/auth/login" in text or 'name="_csrftoken"' in text)
+        )
 
 
     def test_login(self):
