@@ -59,15 +59,24 @@ def _extract_work_id(row) -> str | None:
 
 def parse_works_html(html: str) -> list[AdvocateWork]:
     soup = BeautifulSoup(html or "", "lxml")
-    tbody = soup.find("tbody")
-    if tbody is None:
-        return []
-
     parsed: list[AdvocateWork] = []
     seen_ids: set[str] = set()
 
-    for row in tbody.find_all("tr"):
-        cols = row.find_all("td")
+    # Advocate Diaries has used both a conventional table and responsive
+    # Bootstrap rows for this screen.  Parse either representation.
+    tbody = soup.find("tbody")
+    rows = tbody.find_all("tr", recursive=False) if tbody else []
+    if not rows:
+        rows = [
+            row for row in soup.select(".row")
+            if "Case Title:" in row.get_text(" ", strip=True)
+            and len(row.find_all(recursive=False)) >= 3
+        ]
+
+    for row in rows:
+        cols = row.find_all("td", recursive=False)
+        if len(cols) < 3:
+            cols = row.find_all(recursive=False)
         if len(cols) < 3:
             continue
 

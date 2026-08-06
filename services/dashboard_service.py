@@ -344,20 +344,12 @@ def _count_notifications() -> int:
 
 
 def _count_pending_works() -> int:
+    from services.ad_work_service import parse_works_html
+
     response = AdvocateWeb().works("pending")
     if response.status_code != 200:
         raise RuntimeError(f"Advocate Diaries works returned HTTP {response.status_code}")
-
-    soup = BeautifulSoup(response.text, "lxml")
-    tbody = soup.find("tbody")
-    if tbody is None:
-        return 0
-
-    count = 0
-    for row in tbody.find_all("tr"):
-        if len(row.find_all("td")) >= 3:
-            count += 1
-    return count
+    return len(parse_works_html(response.text))
 
 
 def get_dashboard_summary(telegram_user_id: int | None = None) -> DashboardSummary:
