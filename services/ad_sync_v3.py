@@ -68,6 +68,28 @@ def first_nonblank(
     return None
 
 
+def deep_first_nonblank(
+    value: Any,
+    keys: Iterable[str]
+) -> Any:
+    """Return an explicitly named value from a nested API payload."""
+    wanted = tuple(keys)
+    if isinstance(value, dict):
+        direct = first_nonblank(value, wanted)
+        if direct is not None:
+            return direct
+        for child in value.values():
+            found = deep_first_nonblank(child, wanted)
+            if found is not None:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            found = deep_first_nonblank(child, wanted)
+            if found is not None:
+                return found
+    return None
+
+
 def login() -> str:
     if not AD_EMAIL or not AD_PASSWORD:
         raise RuntimeError(
@@ -320,16 +342,19 @@ def parse_case_payload(
             )
         ),
 
+        # ``hearing_date`` is deliberately excluded: Advocate Diaries uses it
+        # for a previous/historical listing in some court_cases responses.
         "next_hearing": clean_text(
-            payload.get("next_date")
-            or payload.get(
-                "next_hearing"
-            )
-            or payload.get(
-                "next_hearing_date"
-            )
-            or payload.get(
-                "hearing_date"
+            deep_first_nonblank(
+                payload,
+                (
+                    "next_date",
+                    "next_hearing",
+                    "next_hearing_date",
+                    "nextDate",
+                    "nextHearing",
+                    "nextHearingDate",
+                ),
             )
         ),
 
