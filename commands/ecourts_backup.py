@@ -32,6 +32,7 @@ from services.ecourts_order_service import (
     mark_orders_alerted,
     scan_order_inbox,
 )
+from services.ecourtsindia_api_service import download_new_orders
 from services.ecourts_orchestration_service import (
     generate_order_work_proposals,
     list_work_proposals,
@@ -789,13 +790,23 @@ async def syncecourtsorders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _authorize(update):
         return
     waiting = await update.effective_message.reply_text(
-        "⏳ Scanning the Google Drive eCourts Order Inbox…"
+        "⏳ Checking eCourtsIndia for new orders, then scanning the Drive inbox…"
     )
     try:
+        api_result = await asyncio.to_thread(
+            download_new_orders,
+            max(1, int(os.getenv("ECOURTSINDIA_MAX_CASES_PER_SCAN", "20"))),
+            max(1, int(os.getenv("ECOURTSINDIA_MAX_ORDERS_PER_SCAN", "5"))),
+            True,
+        )
         result = await asyncio.to_thread(scan_order_inbox, 10, True)
         proposals = await asyncio.to_thread(generate_order_work_proposals, 10)
         await waiting.edit_text(
             "✅ Order Inbox scan complete.\n\n"
+            f"API enabled: {'Yes' if api_result['enabled'] else 'No'}\n"
+            f"Approved CNRs checked: {api_result['cases_checked']}\n"
+            f"New API PDFs downloaded: {api_result['downloaded']}\n"
+            f"API failures: {api_result['failed']}\n\n"
             f"PDFs present: {result['files_seen']}\n"
             f"Processed/retried: {result['processed_count']}\n\n"
             f"New AI work proposal(s): {len(proposals)}\n\n"
@@ -1309,6 +1320,12 @@ async def ecourts_backup_sync_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def ecourts_order_inbox_job(context: ContextTypes.DEFAULT_TYPE):
     try:
+        await asyncio.to_thread(
+            download_new_orders,
+            max(1, int(os.getenv("ECOURTSINDIA_MAX_CASES_PER_SCAN", "20"))),
+            max(1, int(os.getenv("ECOURTSINDIA_MAX_ORDERS_PER_SCAN", "5"))),
+            False,
+        )
         await asyncio.to_thread(
             scan_order_inbox,
             max(1, int(os.getenv("ECOURTS_ORDER_MAX_FILES_PER_SCAN", "5"))),
