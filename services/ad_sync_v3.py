@@ -325,6 +325,12 @@ def parse_case_payload(
             or payload.get(
                 "next_hearing"
             )
+            or payload.get(
+                "next_hearing_date"
+            )
+            or payload.get(
+                "hearing_date"
+            )
         ),
 
         "status": clean_text(

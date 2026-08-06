@@ -85,7 +85,7 @@ def _case_key(value: Any) -> str:
     return "".join(ch for ch in str(value or "").casefold() if ch.isalnum())
 
 
-def _refresh_linked_ad_dates() -> int:
+def _refresh_linked_ad_dates() -> tuple[int, list[str]]:
     """Refresh linked Office OS dates from live Advocate Diaries case data.
 
     This deliberately avoids the full client/Drive synchronization.  If the
@@ -109,9 +109,15 @@ def _refresh_linked_ad_dates() -> int:
         if ad_case_id:
             live_ids[ad_case_id] = next_date
 
+    if raw_cases and not live_dates and not live_ids:
+        raise RuntimeError(
+            "Advocate Diaries returned cases but no readable live next-hearing dates."
+        )
+
     conn = _conn()
     cur = conn.cursor()
     updated = 0
+    verified_local_ids: list[str] = []
     try:
         cur.execute("""
             SELECT c.id::text, c.ad_case_id,
@@ -127,6 +133,7 @@ def _refresh_linked_ad_dates() -> int:
                 next_date = live_dates.get(_case_key(case_number))
             if next_date is None:
                 continue
+            verified_local_ids.append(str(local_case_pk))
             cur.execute("""
                 UPDATE cases
                    SET next_hearing=%s,
@@ -137,7 +144,7 @@ def _refresh_linked_ad_dates() -> int:
             """, (next_date.isoformat(), str(local_case_pk), next_date.isoformat()))
             updated += int(cur.rowcount)
         conn.commit()
-        return updated
+        return updated, sorted(set(verified_local_ids))
     except Exception:
         conn.rollback()
         raise
@@ -167,7 +174,11 @@ def _consumer_case_clause(columns: set[str], alias: str = "c") -> str:
 def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, int]:
     """Compare approved links. Never overwrite a staff-entered date."""
     ensure_date_verification_schema()
-    ad_dates_refreshed = _refresh_linked_ad_dates()
+    ad_dates_refreshed, live_ad_case_ids = _refresh_linked_ad_dates()
+    if not live_ad_case_ids:
+        raise RuntimeError(
+            "No approved CNR-linked case could be verified against a live Advocate Diaries date."
+        )
     conn = _conn()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     counts = {
@@ -182,6 +193,18 @@ def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, in
     }
     try:
         columns = _case_columns(cur)
+        cur.execute("""
+            UPDATE ecourts_date_verifications
+               SET verification_status='AWAITING_AD_REFRESH',
+                   status_message='Live Advocate Diaries date was not available; conflict suppressed.',
+                   alert_sent_at=NULL,
+                   review_decision=NULL,
+                   reviewed_by=NULL,
+                   reviewed_at=NULL,
+                   updated_at=NOW()
+             WHERE verification_status='DATE_CONFLICT'
+               AND NOT (local_case_pk=ANY(%s))
+        """, (live_ad_case_ids,))
         if "status" in columns:
             cur.execute(f"""
                 UPDATE ecourts_date_verifications v
@@ -259,8 +282,9 @@ def reconcile_date_verifications(sync_run_id: int | None = None) -> dict[str, in
             WHERE l.link_status='APPROVED'
               {active_status_clause}
               AND NOT ({consumer_clause})
+              AND l.local_case_pk=ANY(%s)
               AND (%s IS NULL OR b.last_sync_run_id=%s)
-        """, (sync_run_id, sync_run_id))
+        """, (live_ad_case_ids, sync_run_id, sync_run_id))
         rows = [dict(row) for row in cur.fetchall()]
         for row in rows:
             status, message = classify_dates(
