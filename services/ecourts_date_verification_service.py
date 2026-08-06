@@ -283,8 +283,17 @@ def list_date_conflicts(limit: int = 20, unalerted_only: bool = False) -> list[d
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute(f"""
-            SELECT v.* FROM ecourts_date_verifications v
+            SELECT v.*,
+                   COALESCE(
+                       NULLIF(TRIM(c.case_title), ''),
+                       NULLIF(CONCAT_WS(
+                           ' vs ', NULLIF(TRIM(b.petitioner_name), ''),
+                           NULLIF(TRIM(b.respondent_name), '')
+                       ), '')
+                   ) case_title
+            FROM ecourts_date_verifications v
             JOIN cases c ON c.id::text=v.local_case_pk
+            LEFT JOIN ecourts_backup_records b ON b.cino=v.cino
             WHERE v.verification_status='DATE_CONFLICT'
               AND UPPER(TRIM(COALESCE(c.status,'OPEN')))
                   NOT IN ({_TERMINAL_STATUS_SQL})
