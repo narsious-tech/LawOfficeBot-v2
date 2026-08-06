@@ -93,8 +93,8 @@ def _consumer_case_clause(columns: set[str], alias: str = "c") -> str:
     for name in ("case_type", "type", "court", "court_name"):
         if name in columns:
             predicates.append(
-                f"UPPER(COALESCE({alias}.{name}::text,'')) LIKE ANY "
-                "(ARRAY['%CONSUMER%','%DCDRC%','%SCDRC%','%NCDRC%'])"
+                f"UPPER(COALESCE({alias}.{name}::text,'')) "
+                r"~ '(CONSUMER|DCDRC|SCDRC|NCDRC)'"
             )
     return f"({' OR '.join(predicates)})" if predicates else "FALSE"
 
