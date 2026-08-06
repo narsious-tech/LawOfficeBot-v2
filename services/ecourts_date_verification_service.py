@@ -85,6 +85,57 @@ def _case_key(value: Any) -> str:
     return "".join(ch for ch in str(value or "").casefold() if ch.isalnum())
 
 
+def _ad_web_next_date(web: Any, case_number: str) -> date | None:
+    """Read the date rendered on Advocate Diaries' Cases page.
+
+    The public ``court_cases`` API can lag behind the Cases web page and has
+    returned historical dates as current ones.  The rendered Cases page is the
+    office-facing source of truth used here.
+    """
+    import re
+    from bs4 import BeautifulSoup
+
+    wanted = _case_key(case_number)
+    if not wanted:
+        return None
+    number_part = next(
+        (part for part in str(case_number).split("/") if part.strip().isdigit()),
+        str(case_number),
+    )
+    searches = [str(case_number).strip()]
+    if str(number_part).strip() not in searches:
+        searches.append(str(number_part).strip())
+
+    for search in searches:
+        response = web.get("/courtCases", params={"search": search, "status": ""})
+        response.raise_for_status()
+        if "/auth/login" in str(getattr(response, "url", "") or ""):
+            raise RuntimeError("Advocate Diaries web session expired during date verification")
+        soup = BeautifulSoup(response.text or "", "lxml")
+        for row in soup.select("table#cases-list tbody tr, tr[id^='case_']"):
+            row_text = " ".join(row.get_text(" ", strip=True).split())
+            match = re.search(
+                r"Case\s*Number\s*:\s*(.+?)(?=\s+Pending\b|\s+Case\s+Status\s*:|$)",
+                row_text,
+                flags=re.I,
+            )
+            if not match or _case_key(match.group(1)) != wanted:
+                continue
+            cells = row.find_all("td", recursive=False)
+            hearing_cell = cells[3] if len(cells) > 3 else row
+            node = hearing_cell.select_one("span.blinking")
+            raw_date = node.get_text(" ", strip=True) if node else ""
+            if not raw_date:
+                next_match = re.search(
+                    r"Next\s+Hearing\s*:\s*([0-9./-]+)",
+                    hearing_cell.get_text(" ", strip=True),
+                    flags=re.I,
+                )
+                raw_date = next_match.group(1) if next_match else ""
+            return _as_date(raw_date)
+    return None
+
+
 def _refresh_linked_ad_dates() -> tuple[int, list[str]]:
     """Refresh linked Office OS dates from live Advocate Diaries case data.
 
@@ -92,27 +143,7 @@ def _refresh_linked_ad_dates() -> tuple[int, list[str]]:
     live read fails, the caller fails closed rather than comparing eCourts to a
     stale local date and generating a false conflict.
     """
-    from services.ad_sync_v3 import fetch_all_cases, login, parse_case_payload
-
-    raw_cases = fetch_all_cases(login())
-    live_dates: dict[str, date] = {}
-    live_ids: dict[str, date] = {}
-    for raw in raw_cases:
-        parsed = parse_case_payload(raw)
-        next_date = _as_date(parsed.get("next_hearing"))
-        if not next_date:
-            continue
-        number_key = _case_key(parsed.get("case_number"))
-        ad_case_id = str(parsed.get("ad_case_id") or "").strip()
-        if number_key:
-            live_dates[number_key] = next_date
-        if ad_case_id:
-            live_ids[ad_case_id] = next_date
-
-    if raw_cases and not live_dates and not live_ids:
-        raise RuntimeError(
-            "Advocate Diaries returned cases but no readable live next-hearing dates."
-        )
+    from advocate_web import AdvocateWeb
 
     conn = _conn()
     cur = conn.cursor()
@@ -120,17 +151,15 @@ def _refresh_linked_ad_dates() -> tuple[int, list[str]]:
     verified_local_ids: list[str] = []
     try:
         cur.execute("""
-            SELECT c.id::text, c.ad_case_id,
-                   COALESCE(c.case_number, c.case_id) case_number
+            SELECT c.id::text, COALESCE(c.case_number, c.case_id) case_number
             FROM cases c
             JOIN ecourts_case_links l
               ON l.local_case_pk=c.id::text AND l.link_status='APPROVED'
         """)
         rows = cur.fetchall()
-        for local_case_pk, ad_case_id, case_number in rows:
-            next_date = live_ids.get(str(ad_case_id or "").strip())
-            if next_date is None:
-                next_date = live_dates.get(_case_key(case_number))
+        web = AdvocateWeb()
+        for local_case_pk, case_number in rows:
+            next_date = _ad_web_next_date(web, str(case_number or ""))
             if next_date is None:
                 continue
             verified_local_ids.append(str(local_case_pk))
