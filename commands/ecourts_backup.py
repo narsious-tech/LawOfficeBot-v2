@@ -150,6 +150,7 @@ async def ecourts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _date_conflict_text(item: dict) -> str:
     return (
         "⚠️ <b>NEXT-DATE CONFLICT — ADMIN DECISION</b>\n\n"
+        f"Case Title: <b>{html.escape(str(item.get('case_title') or 'Not recorded'))}</b>\n"
         f"Case: <b>{html.escape(str(item.get('display_case_number') or '-'))}</b>\n"
         f"CNR: <code>{html.escape(str(item.get('cino') or '-'))}</code>\n\n"
         f"👥 Staff / Advocate Diaries: "
