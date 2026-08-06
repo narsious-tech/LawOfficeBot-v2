@@ -753,6 +753,7 @@ def _order_text(item: dict, include_summary: bool = False) -> str:
         f"<b>{html.escape(str(item.get('original_name') or 'Order PDF'))}</b>",
         f"{status_icons.get(processing_status, 'ℹ️')} "
         f"Status: <b>{html.escape(str(processing_status or '-'))}</b>",
+        f"Case Title: <b>{html.escape(str(item.get('case_title') or 'Not recorded'))}</b>",
         f"Case: <b>{html.escape(str(item.get('case_number') or 'Not matched'))}</b>",
         f"CNR: <code>{html.escape(str(item.get('cino') or '-'))}</code>",
     ]
