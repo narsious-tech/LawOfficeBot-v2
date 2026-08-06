@@ -113,30 +113,50 @@ def _match_case(cur, file_name: str, text: str) -> dict[str, Any] | None:
     cnrs = re.findall(r"\b[A-Z]{4}\d{12}\b", haystack)
     for cino in cnrs:
         cur.execute("""
-            SELECT b.cino, b.display_case_number, l.local_case_pk
+            SELECT b.cino, b.display_case_number, l.local_case_pk,
+                   COALESCE(
+                       NULLIF(TRIM(c.case_title), ''),
+                       NULLIF(CONCAT_WS(
+                           ' vs ', NULLIF(TRIM(b.petitioner_name), ''),
+                           NULLIF(TRIM(b.respondent_name), '')
+                       ), '')
+                   ) case_title
             FROM ecourts_backup_records b
             LEFT JOIN ecourts_case_links l
               ON l.cino=b.cino AND l.link_status='APPROVED'
+            LEFT JOIN cases c ON c.id::text=l.local_case_pk
             WHERE b.cino=%s
         """, (cino,))
         row = cur.fetchone()
         if row:
-            return {"cino": row[0], "case_number": row[1], "local_case_pk": row[2]}
+            return {
+                "cino": row[0], "case_number": row[1],
+                "local_case_pk": row[2], "case_title": row[3],
+            }
 
     cur.execute("""
-        SELECT b.cino, b.display_case_number, l.local_case_pk
+        SELECT b.cino, b.display_case_number, l.local_case_pk,
+               COALESCE(
+                   NULLIF(TRIM(c.case_title), ''),
+                   NULLIF(CONCAT_WS(
+                       ' vs ', NULLIF(TRIM(b.petitioner_name), ''),
+                       NULLIF(TRIM(b.respondent_name), '')
+                   ), '')
+               ) case_title
         FROM ecourts_backup_records b
         LEFT JOIN ecourts_case_links l
           ON l.cino=b.cino AND l.link_status='APPROVED'
+        LEFT JOIN cases c ON c.id::text=l.local_case_pk
         WHERE b.display_case_number IS NOT NULL
     """)
     candidates = []
-    for cino, case_number, local_pk in cur.fetchall():
+    for cino, case_number, local_pk, case_title in cur.fetchall():
         token = _compact(case_number)
         if token and len(token) >= 7 and token in compact:
             candidates.append({
                 "cino": cino, "case_number": case_number,
-                "local_case_pk": local_pk, "token_length": len(token),
+                "local_case_pk": local_pk, "case_title": case_title,
+                "token_length": len(token),
             })
     if not candidates:
         return None
@@ -371,6 +391,7 @@ def scan_order_inbox(max_files: int = 10, retry_unmatched: bool = False) -> dict
                     "id": record_id, "name": item.get("name"),
                     "status": status, "importance": importance,
                     "case_number": match.get("case_number") if match else None,
+                    "case_title": match.get("case_title") if match else None,
                     "cino": match.get("cino") if match else None,
                     "original_link": item.get("webViewLink"),
                     "archived_link": archived_link, "ai_summary": summary,
@@ -412,16 +433,25 @@ def list_orders(limit: int = 30, only_unalerted: bool = False) -> list[dict[str,
     cur = conn.cursor()
     try:
         where = (
-            "WHERE alerted_at IS NULL AND processing_status<>'DUPLICATE'"
+            "WHERE o.alerted_at IS NULL AND o.processing_status<>'DUPLICATE'"
             if only_unalerted else ""
         )
         cur.execute(f"""
-            SELECT id, original_name, original_link, cino, case_number,
-                   processing_status, importance, ai_summary,
-                   archived_drive_link, processed_at, alerted_at, error_message
-            FROM ecourts_order_inbox
+            SELECT o.id, o.original_name, o.original_link, o.cino, o.case_number,
+                   o.processing_status, o.importance, o.ai_summary,
+                   o.archived_drive_link, o.processed_at, o.alerted_at, o.error_message,
+                   COALESCE(
+                       NULLIF(TRIM(c.case_title), ''),
+                       NULLIF(CONCAT_WS(
+                           ' vs ', NULLIF(TRIM(b.petitioner_name), ''),
+                           NULLIF(TRIM(b.respondent_name), '')
+                       ), '')
+                   ) case_title
+            FROM ecourts_order_inbox o
+            LEFT JOIN cases c ON c.id::text=o.local_case_pk
+            LEFT JOIN ecourts_backup_records b ON b.cino=o.cino
             {where}
-            ORDER BY id DESC LIMIT %s
+            ORDER BY o.id DESC LIMIT %s
         """, (max(1, min(int(limit), 100)),))
         names = [column.name for column in cur.description]
         return [dict(zip(names, row)) for row in cur.fetchall()]
