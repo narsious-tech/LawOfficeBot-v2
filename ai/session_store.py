@@ -67,3 +67,33 @@ class AISessionStore:
                     )
         finally:
             conn.close()
+
+    def usage_summary(self, days: int = 30) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT model,
+                              COUNT(*) FILTER (WHERE status='SUCCESS') AS successful_calls,
+                              COUNT(*) FILTER (WHERE status='FAILED') AS failed_calls,
+                              COALESCE(SUM(input_tokens) FILTER (WHERE status='SUCCESS'),0),
+                              COALESCE(SUM(output_tokens) FILTER (WHERE status='SUCCESS'),0),
+                              COALESCE(SUM(total_tokens) FILTER (WHERE status='SUCCESS'),0)
+                       FROM ai_usage
+                       WHERE created_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')
+                       GROUP BY model ORDER BY model""",
+                    (max(1, min(int(days), 366)),),
+                )
+                return [
+                    {
+                        "model": row[0],
+                        "successful_calls": int(row[1] or 0),
+                        "failed_calls": int(row[2] or 0),
+                        "input_tokens": int(row[3] or 0),
+                        "output_tokens": int(row[4] or 0),
+                        "total_tokens": int(row[5] or 0),
+                    }
+                    for row in cur.fetchall()
+                ]
+        finally:
+            conn.close()
