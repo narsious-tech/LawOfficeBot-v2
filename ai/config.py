@@ -58,15 +58,15 @@ class AIConfig:
         pro_features = frozenset(
             item.strip().lower() for item in raw_pro_features.split(",") if item.strip()
         )
-        raw_ids = os.getenv("AI_ADMIN_USER_IDS", "")
+        raw_ids = ",".join(filter(None, (
+            os.getenv("AI_ADMIN_USER_IDS", ""),
+            os.getenv("ADMIN_USER_ID", ""),
+        )))
         parsed: set[int] = set()
         for item in raw_ids.split(","):
             item = item.strip()
             if item.lstrip("-").isdigit():
                 parsed.add(int(item))
-        fallback = os.getenv("ADMIN_CHAT_ID", "").strip()
-        if fallback.lstrip("-").isdigit():
-            parsed.add(int(fallback))
         return cls(
             enabled=_bool("AI_ENABLED", False),
             provider=provider,
