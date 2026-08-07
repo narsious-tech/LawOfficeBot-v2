@@ -10,9 +10,15 @@ def e(v): return html.escape(str(v if v not in (None,'') else '-'))
 async def workcontrol(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s=supervision_summary()
     lines=["👩‍💼 <b>PRIYA — WORK CONTROL</b>","🧩 Sprint 14.0.1 AD Floor Resolution Fix","",
-           f"📋 Pending: <b>{s.get('pending',0)}</b>",f"📅 Due Today: <b>{s.get('due_today',0)}</b>",
+           "<b>📋 PENDING WORKS</b>",
+           f"Advocate Diaries: <b>{s.get('ad_pending') if s.get('ad_available') else 'Unavailable'}</b>",
+           f"Manual/local only: <b>{s.get('local_only') if s.get('ad_available') else 'Review unavailable'}</b>",
+           f"Total under staff control: <b>{s.get('pending',0)}</b>","",
+           f"📅 Due Today: <b>{s.get('due_today',0)}</b>",
            f"🔴 Overdue: <b>{s.get('overdue',0)}</b>",f"🟡 Awaiting Verification: <b>{s.get('awaiting_verification',0)}</b>",
            f"✅ Verified Today: <b>{s.get('verified_today',0)}</b>","","<b>STAFF LOAD</b>"]
+    if s.get('ad_available') and s.get('ad_not_local',0):
+        lines.insert(7,f"AD Works not yet under staff control: <b>{s.get('ad_not_local',0)}</b>")
     for r in s.get('staff',[]): lines.append(f"👤 {e(r.get('staff'))}: {r.get('pending',0)} pending · {r.get('overdue',0)} overdue")
     lines += ["","Use /workboard to open pending Works."]
     await update.effective_message.reply_text("\n".join(lines),parse_mode=ParseMode.HTML)
