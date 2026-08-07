@@ -11,6 +11,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 
 from ai.config import AIConfig
+from ai.costs import estimate_cost_usd
 from ai.gateway import AIGateway, AIUnavailable
 from ai.knowledge_service import CaseMatch, OfficeKnowledgeService
 from ai.permissions import is_ai_authorized
@@ -83,10 +84,66 @@ async def ai_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "🧠 AJAY AI\n\n"
         f"Status: {status}\n"
+        f"Provider: {cfg.provider.upper()}\n"
+        f"Routine model: {cfg.model}\n"
         "Private legal intelligence workspace.\n\n"
         "Case Intelligence now prepares a grounded brief from one selected office case.",
         reply_markup=_menu(),
     )
+    return ConversationHandler.END
+
+
+async def ai_cost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorized(update):
+        return ConversationHandler.END
+    try:
+        await asyncio.to_thread(ensure_ai_schema)
+        rows = await asyncio.to_thread(AISessionStore().usage_summary, 30)
+        if not rows:
+            await update.effective_message.reply_text(
+                "💰 AI COST • LAST 30 DAYS\n\nNo recorded AI usage was found."
+            )
+            return ConversationHandler.END
+        lines = ["💰 AI COST • LAST 30 DAYS", ""]
+        known_total = 0.0
+        unknown_models = []
+        successful = failed = input_tokens = output_tokens = 0
+        for row in rows:
+            cost = estimate_cost_usd(
+                row["model"], row["input_tokens"], row["output_tokens"]
+            )
+            successful += row["successful_calls"]
+            failed += row["failed_calls"]
+            input_tokens += row["input_tokens"]
+            output_tokens += row["output_tokens"]
+            if cost is None:
+                unknown_models.append(str(row["model"]))
+                cost_text = "rate unavailable"
+            else:
+                known_total += cost
+                cost_text = f"${cost:.4f}"
+            lines.extend([
+                f"Model: {row['model']}",
+                f"Calls: {row['successful_calls']} successful / {row['failed_calls']} failed",
+                f"Tokens: {row['input_tokens']:,} input / {row['output_tokens']:,} output",
+                f"Estimated cost: {cost_text}",
+                "",
+            ])
+        lines.extend([
+            f"Total successful calls: {successful}",
+            f"Total failed calls: {failed}",
+            f"Total tokens: {input_tokens:,} input / {output_tokens:,} output",
+            f"Estimated known cost: ${known_total:.4f}",
+        ])
+        if unknown_models:
+            lines.append("Models without configured rates: " + ", ".join(unknown_models))
+        lines.append("Estimate excludes taxes, currency conversion and provider adjustments.")
+        await update.effective_message.reply_text("\n".join(lines))
+    except Exception as exc:
+        logger.exception("AI cost report failed")
+        await update.effective_message.reply_text(
+            f"❌ AI cost report failed safely: {type(exc).__name__}"
+        )
     return ConversationHandler.END
 
 
@@ -317,6 +374,7 @@ def build_ai_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
             CommandHandler("ai", ai_home),
+            CommandHandler("aicost", ai_cost),
             CallbackQueryHandler(ai_hearing_day, pattern=r"^ajayai:hearingday:(today|tomorrow)$"),
             CallbackQueryHandler(ai_callback, pattern=r"^ajayai:(?!casepick:).+"),
         ],
