@@ -8,9 +8,30 @@ from services.role_intelligence_service import role_dashboard,file_assignments,u
 from services.case_intelligence_service import staff_telegram_id
 IST=ZoneInfo('Asia/Kolkata')
 
-def _render(d):
+def _profile_is_executive(profile):
+ role=str(profile.get('role') or 'staff').strip().lower()
+ first_name=str(profile.get('staff_name') or '').strip().lower().split(' ',1)[0]
+ return role in ('admin','owner','principal','supervisor','manager') or first_name in ('ajay','priya')
+
+def _configured_admin_ids():
+ return {
+  str(value).strip()
+  for value in (os.getenv('ADMIN_USER_ID'),os.getenv('ADMIN_CHAT_ID'))
+  if value is not None and str(value).strip()
+ }
+
+def _has_office_status_access(update,profile):
+ user_id=str(update.effective_user.id) if update.effective_user else ''
+ chat_id=str(update.effective_chat.id) if update.effective_chat else ''
+ return (
+  user_id in _configured_admin_ids()
+  or chat_id in _configured_admin_ids()
+  or _profile_is_executive(profile)
+ )
+
+def _render(d,office_wide=False):
  p=d['profile']; f=d['files']; w=d['works']; name=p['staff_name']; role=p['role']
- executive=role in ('admin','owner','principal','supervisor','manager') or name.lower() in ('ajay','priya')
+ executive=office_wide or _profile_is_executive(p)
  title='🏢 OFFICE STATUS' if executive else '👤 MY DASHBOARD'
  return '\n'.join([title,f"Staff: {name}",f"Role: {role.title()}",'',
  '📁 PHYSICAL FILES',f"Selected/Pending: {f.get('pending',0)}",f"Brought: {f.get('brought',0)}",f"Not found: {f.get('not_found',0)}",f"Needs attention: {f.get('attention',0)}",'',
@@ -22,11 +43,10 @@ async def mydashboard(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
 async def officestatus(update:Update,context:ContextTypes.DEFAULT_TYPE):
  d=await asyncio.to_thread(role_dashboard,update.effective_user.id)
- name=d['profile']['staff_name'].lower(); role=d['profile']['role']
- if role not in ('admin','owner','principal','supervisor','manager') and name not in ('ajay','priya'):
+ if not _has_office_status_access(update,d['profile']):
   await update.effective_message.reply_text('⛔ Office-wide status is available only to Ajay and Priya. Use /mydashboard.')
   return
- await update.effective_message.reply_text(_render(d))
+ await update.effective_message.reply_text(_render(d,office_wide=True))
 
 def file_status_keyboard(row):
  i=row['id']
