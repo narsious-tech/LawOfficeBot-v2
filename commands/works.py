@@ -60,6 +60,58 @@ async def send_long_reply(update, message):
             chunk
         )
 
+
+def load_active_work_assignees(records):
+    """Return active local assignees keyed by private Advocate Diaries work ID."""
+    work_ids = [
+        str(record.work_id)
+        for record in records
+        if record.work_id
+    ]
+
+    if not work_ids:
+        return {}, None
+
+    conn = None
+    cur = None
+
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT source_work_id, assigned_to
+            FROM tasks
+            WHERE source_type = 'advocate_diaries_work'
+              AND source_work_id = ANY(%s)
+              AND UPPER(COALESCE(status, 'PENDING')) = 'PENDING'
+              AND NULLIF(TRIM(COALESCE(assigned_to, '')), '') IS NOT NULL
+            ORDER BY id ASC
+        """, (work_ids,))
+
+        assignees = {}
+        for source_work_id, assigned_to in cur.fetchall():
+            key = str(source_work_id)
+            name = str(assigned_to).strip()
+            names = assignees.setdefault(key, [])
+            if name and name.casefold() not in {
+                existing.casefold() for existing in names
+            }:
+                names.append(name)
+
+        return {
+            work_id: ", ".join(names)
+            for work_id, names in assignees.items()
+        }, None
+
+    except Exception as exc:
+        return {}, f"{type(exc).__name__}: {exc}"
+
+    finally:
+        if cur is not None:
+            cur.close()
+        if conn is not None:
+            conn.close()
+
 async def works(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = "pending"
     if context.args:
@@ -83,7 +135,19 @@ async def works(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    assignees_by_work_id, assignment_error = load_active_work_assignees(
+        records
+    )
+
     for index, record in enumerate(records, start=1):
+        assigned_to = assignees_by_work_id.get(
+            str(record.work_id)
+        ) if record.work_id else None
+        assignment_label = (
+            "⚠️ Assignment unavailable"
+            if assignment_error
+            else assigned_to or "⚪ Not assigned"
+        )
         short_case = (
             record.case_details.split("\n")[0]
             if record.case_details
@@ -91,10 +155,10 @@ async def works(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         full_item = (
             f"📋 Work #{index}\n\n"
-            f"🔗 Advocate Diaries Work ID: {record.work_id or '-'}\n"
             f"👤 Client: {record.client}\n\n"
             f"⚖️ {record.case_details}\n\n"
-            f"📝 Work: {record.description}"
+            f"📝 Work: {record.description}\n"
+            f"👥 Assigned to: {assignment_label}"
         )
         context.user_data["works_map"][str(index)] = {
             "details": full_item,
@@ -105,12 +169,13 @@ async def works(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "case_number": record.case_number,
             "next_hearing": record.next_hearing,
             "work_description": record.description,
+            "assigned_to": assigned_to,
         }
         message += (
             f"{index}. 👤 {record.client}\n"
             f"⚖️ {short_case}\n"
             f"📝 {record.description}\n"
-            f"🔗 ID: {record.work_id or '-'}\n\n"
+            f"👥 Assigned to: {assignment_label}\n\n"
         )
 
     message += (
