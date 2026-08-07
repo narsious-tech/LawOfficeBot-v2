@@ -27,6 +27,10 @@ def _menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💬 Ask Ajay AI", callback_data="ajayai:ask")],
         [InlineKeyboardButton("📄 Case Intelligence", callback_data="ajayai:case")],
         [InlineKeyboardButton("⚖️ Hearing Intelligence", callback_data="ajayai:hearing")],
+        [
+            InlineKeyboardButton("💰 AI Cost", callback_data="ajayai:cost"),
+            InlineKeyboardButton("🔄 Sync Orders", callback_data="ajayai:syncorders"),
+        ],
         [InlineKeyboardButton("📚 Legal Research", callback_data="ajayai:coming:research")],
         [InlineKeyboardButton("📝 Drafting", callback_data="ajayai:coming:drafting")],
         [InlineKeyboardButton("📂 Documents", callback_data="ajayai:coming:documents")],
@@ -158,6 +162,12 @@ async def ai_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("ajay_ai_mode", None)
         await query.edit_message_text("Ajay AI workspace closed. Use /ai to reopen it.")
         return ConversationHandler.END
+    if data == "ajayai:cost":
+        return await ai_cost(update, context)
+    if data == "ajayai:syncorders":
+        from commands.ecourts_backup import syncecourtsorders
+
+        return await syncecourtsorders(update, context)
     if data.startswith("ajayai:coming:"):
         feature = data.rsplit(":", 1)[-1].replace("_", " ").title()
         await query.message.reply_text(f"🧠 {feature} is reserved for the next intelligence release.")
