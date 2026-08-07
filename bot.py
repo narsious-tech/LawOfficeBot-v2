@@ -4218,13 +4218,13 @@ app.job_queue.run_daily(
 app.job_queue.run_daily(
     morning_dashboard_job,
     time=time(
-        hour=9,
-        minute=5,
+        hour=11,
+        minute=15,
         tzinfo=ZoneInfo(
             "Asia/Kolkata"
         )
     ),
-    name="morning_dashboard_905am"
+    name="morning_dashboard_1115am"
 )
 
 app.job_queue.run_daily(
