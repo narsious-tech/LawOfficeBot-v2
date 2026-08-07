@@ -195,6 +195,7 @@ from commands.finance_ledger import register_ledger_handlers
 from commands.loan_ledger import register_loan_ledger_handlers, loan_interest_reminder_job
 from commands.whatsapp_admin import register_whatsapp_handlers, whatsapp_retry_job
 from commands.command_centre import register_command_centre
+from commands.access_control import register_access_control
 from commands.ecourts_backup import (
     register_ecourts_handlers,
     ecourts_backup_sync_job,
@@ -3471,6 +3472,11 @@ except Exception as exc:
 
 app = ApplicationBuilder().token(TOKEN).build()
 
+# Sprint 28.1 central authorization runs before every legacy and modular
+# command/callback handler.  Individual feature checks remain in place as a
+# second line of defence.
+register_access_control(app)
+
 # Sprint 26 unified role-aware command centre.  It is registered before the
 # legacy /commands handler, while every existing command remains available.
 register_command_centre(app)
@@ -4218,13 +4224,13 @@ app.job_queue.run_daily(
 app.job_queue.run_daily(
     morning_dashboard_job,
     time=time(
-        hour=11,
-        minute=15,
+        hour=10,
+        minute=5,
         tzinfo=ZoneInfo(
             "Asia/Kolkata"
         )
     ),
-    name="morning_dashboard_1115am"
+    name="morning_dashboard_1005am"
 )
 
 app.job_queue.run_daily(
