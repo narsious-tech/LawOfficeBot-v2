@@ -67,14 +67,39 @@ def update_file_status(assignment_id:int,status:str,user_id:int,user_name:str,no
         row=cur.fetchone(); return dict(row) if row else None
 
 def staff_profile(telegram_id:int)->dict:
+    configured_admin_id=str(os.getenv("ADMIN_USER_ID") or "").strip()
+    is_configured_admin=(
+        bool(configured_admin_id)
+        and str(telegram_id).strip()==configured_admin_id
+    )
     with _connect() as con, con.cursor(cursor_factory=RealDictCursor) as cur:
         try:
             cur.execute("SELECT staff_name,role,is_active FROM staff_accounts WHERE telegram_user_id=%s LIMIT 1",(telegram_id,))
         except Exception:
             con.rollback(); cur.execute("SELECT staff_name,is_active FROM staff_accounts WHERE telegram_user_id=%s LIMIT 1",(telegram_id,))
         r=cur.fetchone()
-        if not r: return {'staff_name':'Staff','role':'staff','is_active':True}
-        d=dict(r); d['role']=str(d.get('role') or 'staff').lower(); return d
+        if not r:
+            if is_configured_admin:
+                return {'staff_name':'Ajay','role':'admin','is_active':True}
+            return {'staff_name':'Staff','role':'staff','is_active':True}
+        d=dict(r); d['role']=str(d.get('role') or 'staff').lower()
+        if is_configured_admin:
+            d['role']='admin'
+            if str(d.get('staff_name') or '').strip().lower() in ('','staff'):
+                d['staff_name']='Ajay'
+        return d
+
+def _live_ad_pending_work_count()->int:
+    """Use the same authoritative pending-work source as the /works command."""
+    from advocate_web import AdvocateWeb
+    from services.ad_work_service import parse_works_html
+
+    response=AdvocateWeb().works('pending')
+    if response.status_code!=200:
+        raise RuntimeError(
+            f"Advocate Diaries works returned HTTP {response.status_code}"
+        )
+    return len(parse_works_html(response.text))
 
 def role_dashboard(telegram_id:int)->dict:
     ensure_schema(); p=staff_profile(telegram_id); name=p['staff_name']; role=p['role']
@@ -99,6 +124,12 @@ def role_dashboard(telegram_id:int)->dict:
             works=dict(cur.fetchone())
         except Exception:
             con.rollback()
+        try:
+            works['pending']=_live_ad_pending_work_count()
+        except Exception:
+            # Preserve the local count if Advocate Diaries is temporarily
+            # unavailable instead of failing the whole Office Status page.
+            pass
         pending_updates=0
         try:
             from services.case_intelligence_service import advocate_diaries_pending_cases
