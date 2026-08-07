@@ -150,6 +150,18 @@ def reconcile_live_hearings() -> int:
     finally:
       if conn: conn.close()
 
+def _live_ad_pending_work_count() -> int:
+    """Return the authoritative live pending Work count from Advocate Diaries."""
+    from advocate_web import AdvocateWeb
+    from services.ad_work_service import parse_works_html
+
+    response = AdvocateWeb().works("pending")
+    if response.status_code != 200:
+      raise RuntimeError(
+        f"Advocate Diaries works returned HTTP {response.status_code}"
+      )
+    return len(parse_works_html(response.text))
+
 def supervision_summary() -> dict:
     ensure_schema(); conn=_connect()
     try:
@@ -167,5 +179,17 @@ def supervision_summary() -> dict:
           COUNT(*) FILTER(WHERE due_date<CURRENT_DATE AND UPPER(status) NOT IN ('COMPLETED','VERIFIED','CLOSED')) overdue
           FROM case_works GROUP BY assigned_to ORDER BY pending DESC""")
         total['staff']=[dict(r) for r in cur.fetchall()]
+        local_pending=int(total.get('pending') or 0)
+        try:
+          ad_pending=_live_ad_pending_work_count()
+          total['ad_pending']=ad_pending
+          total['local_only']=max(local_pending-ad_pending,0)
+          total['ad_not_local']=max(ad_pending-local_pending,0)
+          total['ad_available']=True
+        except Exception:
+          total['ad_pending']=None
+          total['local_only']=None
+          total['ad_not_local']=None
+          total['ad_available']=False
         return total
     finally: conn.close()
