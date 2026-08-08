@@ -25,6 +25,18 @@ def _float(name: str, default: float) -> float:
         return default
 
 
+def _csv(name: str, default: str = "") -> tuple[str, ...]:
+    raw = os.getenv(name, default) or ""
+    seen: set[str] = set()
+    values: list[str] = []
+    for item in raw.split(","):
+        value = item.strip()
+        if value and value not in seen:
+            seen.add(value)
+            values.append(value)
+    return tuple(values)
+
+
 @dataclass(frozen=True)
 class AIConfig:
     enabled: bool
@@ -36,6 +48,9 @@ class AIConfig:
     openai_api_key: str
     openai_model: str
     openai_fallback_enabled: bool
+    gemini_fallback_models: tuple[str, ...]
+    retry_attempts: int
+    retry_base_seconds: float
     max_output_tokens: int
     temperature: float
     timeout_seconds: int
@@ -46,27 +61,46 @@ class AIConfig:
         provider = (os.getenv("AI_PROVIDER", "openai") or "openai").strip().lower()
         if provider not in {"openai", "gemini"}:
             provider = "openai"
+
         openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
         openai_model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip()
+
         gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
         gemini_pro_model = os.getenv("GEMINI_PRO_MODEL", "gemini-2.5-pro").strip()
+
         raw_pro_features = os.getenv(
             "GEMINI_PRO_FEATURES",
             "general,case_intelligence,hearing_intelligence",
         )
         pro_features = frozenset(
-            item.strip().lower() for item in raw_pro_features.split(",") if item.strip()
+            item.strip().lower()
+            for item in raw_pro_features.split(",")
+            if item.strip()
         )
-        raw_ids = ",".join(filter(None, (
-            os.getenv("AI_ADMIN_USER_IDS", ""),
-            os.getenv("ADMIN_USER_ID", ""),
-        )))
+
+        raw_ids = ",".join(
+            filter(
+                None,
+                (
+                    os.getenv("AI_ADMIN_USER_IDS", ""),
+                    os.getenv("ADMIN_USER_ID", ""),
+                ),
+            )
+        )
         parsed: set[int] = set()
         for item in raw_ids.split(","):
             item = item.strip()
             if item.lstrip("-").isdigit():
                 parsed.add(int(item))
+
+        # Ordered Gemini fallbacks. The gateway removes duplicates and the
+        # currently selected primary/pro model automatically.
+        gemini_fallback_models = _csv(
+            "GEMINI_FALLBACK_MODELS",
+            "gemini-2.5-flash,gemini-2.5-flash-lite",
+        )
+
         return cls(
             enabled=_bool("AI_ENABLED", False),
             provider=provider,
@@ -77,6 +111,11 @@ class AIConfig:
             openai_api_key=openai_api_key,
             openai_model=openai_model,
             openai_fallback_enabled=_bool("AI_OPENAI_FALLBACK_ENABLED", False),
+            gemini_fallback_models=gemini_fallback_models,
+            retry_attempts=min(5, max(1, _int("AI_RETRY_ATTEMPTS", 3))),
+            retry_base_seconds=min(
+                10.0, max(0.25, _float("AI_RETRY_BASE_SECONDS", 1.0))
+            ),
             max_output_tokens=max(256, _int("AI_MAX_OUTPUT_TOKENS", 1800)),
             temperature=min(1.0, max(0.0, _float("AI_TEMPERATURE", 0.2))),
             timeout_seconds=max(10, _int("AI_TIMEOUT_SECONDS", 90)),
