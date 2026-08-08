@@ -65,6 +65,11 @@ from commands.case_assignment import workcontrol, reconcileassignments
 from commands.case_intelligence import nextdateslist, physical_file_next_dates_job
 from commands.role_intelligence import mydashboard, officestatus, myfilesstatus, physical_file_status_callback
 from commands.hearing_readiness import readiness, morningreadiness
+from commands.hearing_preparation_v2 import (
+    preparation,
+    preparationstatus,
+    hearing_preparation_callback,
+)
 from commands.office_os import office, mywork_menu, files_menu, supervisor_menu, los_callback
 from commands.ai import build_ai_handler
 from commands.evening_dashboard import (
@@ -4052,7 +4057,10 @@ app.add_handler(CommandHandler("mydashboard", mydashboard))
 app.add_handler(CommandHandler("officestatus", officestatus))
 app.add_handler(CommandHandler("readiness", readiness))
 app.add_handler(CommandHandler("morningreadiness", morningreadiness))
+app.add_handler(CommandHandler("preparation", preparation))
+app.add_handler(CommandHandler("preparationstatus", preparationstatus))
 app.add_handler(CommandHandler("myfilesstatus", myfilesstatus))
+app.add_handler(CallbackQueryHandler(hearing_preparation_callback, pattern=r"^hp2:"))
 app.add_handler(CallbackQueryHandler(physical_file_status_callback, pattern=r"^pfs:"))
 app.add_handler(CallbackQueryHandler(evening_file_checkin_callback, pattern=r"^efd:"))
 app.add_handler(CallbackQueryHandler(evening_file_selection_callback, pattern=r"^efs:"))
