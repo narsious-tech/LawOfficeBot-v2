@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os
-from datetime import date
+from datetime import date, timedelta
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -10,6 +10,38 @@ FILE_READY = {"BROUGHT","NOT_REQUIRED"}
 
 def _connect():
     return psycopg2.connect(os.environ["DATABASE_URL"])
+
+
+
+def resolve_target_date(base: date | None = None) -> date:
+    """Return the next date that actually has selected physical-file assignments.
+
+    This keeps /preparation aligned with /eveningdashboard on weekends/holidays
+    instead of blindly assuming calendar tomorrow. Falls back to tomorrow when
+    no assignment exists yet.
+    """
+    base = base or date.today()
+    tomorrow = base + timedelta(days=1)
+    try:
+        with _connect() as con, con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT MIN(assignment_date)
+                FROM physical_file_assignments
+                WHERE assignment_date >= %s
+                  AND assignment_date <= %s
+                """,
+                (tomorrow, tomorrow + timedelta(days=7)),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                return row[0]
+    except psycopg2.Error:
+        # The physical-file table may not exist before first evening selection.
+        # Keep the command usable and let the normal empty-state message guide
+        # the user to /eveningdashboard.
+        pass
+    return tomorrow
 
 def ensure_schema():
     with _connect() as con, con.cursor() as cur:
@@ -59,7 +91,7 @@ def sync_from_physical_files(target: date):
               case_title=EXCLUDED.case_title,court=EXCLUDED.court,judge=EXCLUDED.judge,
               floor=EXCLUDED.floor,room=EXCLUDED.room,purpose=EXCLUDED.purpose,
               physical_file_status=EXCLUDED.physical_file_status,updated_at=NOW()
-            """,(target,r["case_number"],r.get("case_title"),r.get("court"),r.get("judge"),r.get("floor"),r.get("room"),r.get("purpose"),r.get("status") or "PENDING"))
+            """,(target,r["case_number"],r.get("case_title"),r.get("court"),r.get("judge"),r.get("floor"),r.get("room"),r.get("purpose"),("PENDING" if (r.get("status") or "SELECTED").upper()=="SELECTED" else r.get("status"))))
         cur.execute("SELECT * FROM hearing_preparation WHERE hearing_date=%s ORDER BY id",(target,))
         rows=[dict(r) for r in cur.fetchall()]
         for r in rows:
