@@ -4,13 +4,13 @@ from datetime import datetime,timedelta
 from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton,InlineKeyboardMarkup,Update
 from telegram.ext import ContextTypes
-from services.hearing_preparation_v2_service import preparation_rows,update_step,summary
+from services.hearing_preparation_v2_service import preparation_rows,update_step,summary,resolve_target_date
 
 IST=ZoneInfo("Asia/Kolkata")
 PAGE=6
 
 def _target():
-    return datetime.now(IST).date()+timedelta(days=1)
+    return resolve_target_date(datetime.now(IST).date())
 
 def _mark(v):
     return {"READY":"✅","BROUGHT":"✅","NOT_REQUIRED":"➖","ATTENTION":"⚠️","NEEDS_ATTENTION":"⚠️","NOT_FOUND":"❌","PENDING":"⬜"}.get(v,"⬜")
@@ -55,7 +55,7 @@ async def preparation(update:Update,context:ContextTypes.DEFAULT_TYPE):
       "Update each matter with the buttons below."
     )
     if not rows:
-        await update.effective_message.reply_text("No selected physical-file matters are available for tomorrow. First select/send files from /eveningdashboard.")
+        await update.effective_message.reply_text("No selected physical-file matters are available for the next hearing date. First select/send files from /eveningdashboard.")
         return
     for r in rows:
         await update.effective_message.reply_text(_row_text(r),reply_markup=_keyboard(r))
