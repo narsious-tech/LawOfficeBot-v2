@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -49,13 +50,29 @@ def _safe(value, fallback="-"):
     return text or fallback
 
 
+def _clean_case_title(case):
+    """Return the Advocate Diaries case title without duplicating the case number."""
+    number = _safe(case.get("case_number"), "")
+    title = _safe(case.get("case_title"), "")
+    if not title:
+        return "Title not recorded"
+    if number:
+        title = re.sub(
+            rf"^\s*{re.escape(number)}\s*[-:|–—]?\s*",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        ).strip()
+    return title or "Title not recorded"
+
+
 def _flatten_cases(groups):
     rows = []
     for group in groups:
         for case in group.get("cases") or []:
             rows.append({
                 "case_number": _safe(case.get("case_number"), "Case number not entered"),
-                "case_title": _safe(case.get("case_title"), "Title not recorded"),
+                "case_title": _clean_case_title(case),
                 "purpose": _safe(case.get("stage") or case.get("purpose"), "Purpose not recorded"),
                 "owner": _safe(case.get("owner_name") or case.get("owner"), "Not assigned"),
                 "court": _safe(group.get("court_name"), "Court not recorded"),
@@ -158,7 +175,7 @@ def _selection_keyboard(state, target, page=0):
         InlineKeyboardButton("☑ Select all", callback_data=f"efs:{target.isoformat()}:all:{page}"),
     ])
     rows.append([InlineKeyboardButton(
-        f"📤 Send {len(selected)} selected files",
+        f"📤 Send {len(selected)} selected files (all pages)",
         callback_data=f"efs:{target.isoformat()}:send:{page}",
     )])
     rows.append([InlineKeyboardButton("🧹 Clear selection", callback_data=f"efs:{target.isoformat()}:clear:{page}")])
