@@ -32,10 +32,15 @@ def _page_bounds(rows, page: int):
 
 def _board_keyboard(rows, page=0):
     page, pages, visible = _page_bounds(rows, page)
-    buttons = [[InlineKeyboardButton(
-        f"{STATUS_LABELS.get(r.get('status'), '⚪')} #{r['id']} {r.get('case_number') or 'Open'}",
-        callback_data=f"lhc:open:{r['id']}:{page}",
-    )] for r in visible]
+    buttons = []
+    for r in visible:
+        status = STATUS_LABELS.get(r.get("status"), "⚪")
+        title = str(r.get("case_title") or r.get("case_number") or "Open hearing").strip()
+        label = f"{status} {title}"[:60]
+        buttons.append([InlineKeyboardButton(
+            label,
+            callback_data=f"lhc:open:{r['id']}:{page}",
+        )])
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"lhc:page:{page-1}"))
