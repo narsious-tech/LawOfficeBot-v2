@@ -1,0 +1,26 @@
+# AJAY AI PROVIDER RESILIENCE — Railway variables
+#
+# Keep your existing secrets. Do NOT put API keys into GitHub.
+
+AI_ENABLED=true
+AI_PROVIDER=gemini
+
+# Primary Gemini models
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_PRO_MODEL=gemini-2.5-pro
+
+# Ordered Gemini fallbacks used after the selected primary/pro model fails.
+# Stable models are intentionally used.
+GEMINI_FALLBACK_MODELS=gemini-2.5-flash,gemini-2.5-flash-lite
+
+# Retry each Gemini model on transient 429/5xx/network failures.
+AI_RETRY_ATTEMPTS=3
+AI_RETRY_BASE_SECONDS=1.0
+
+# Emergency provider fallback.
+AI_OPENAI_FALLBACK_ENABLED=true
+OPENAI_MODEL=gpt-5.5
+
+# Existing secrets required in Railway:
+# GEMINI_API_KEY=...
+# OPENAI_API_KEY=...
