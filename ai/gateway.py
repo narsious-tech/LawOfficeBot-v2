@@ -72,29 +72,77 @@ class AIGateway:
             total_tokens=getattr(usage, "total_tokens", None) if usage else None,
         )
 
+    @staticmethod
+    def _gemini_error(response: requests.Response) -> AIUnavailable:
+        status = response.status_code
+        detail = ""
+        try:
+            payload = response.json()
+            error = payload.get("error") or {}
+            detail = str(error.get("message") or error.get("status") or "").strip()
+        except Exception:
+            detail = (response.text or "").strip()
+
+        detail = " ".join(detail.split())[:700]
+        if status == 400:
+            hint = "Check GEMINI_MODEL and request parameters."
+        elif status in (401, 403):
+            hint = "Check GEMINI_API_KEY and Google AI API permissions."
+        elif status == 404:
+            hint = "The configured Gemini model/endpoint was not found. Check GEMINI_MODEL."
+        elif status == 429:
+            hint = "Gemini quota/rate limit reached. Check Google AI quota/billing."
+        elif status >= 500:
+            hint = "Gemini service returned a server error; retry shortly."
+        else:
+            hint = "Check Gemini configuration and API availability."
+
+        message = f"Gemini HTTP {status}. {hint}"
+        if detail:
+            message += f" Provider message: {detail}"
+        return AIUnavailable(message)
+
     def _generate_gemini(self, *, model: str, instructions: str, input_text: str) -> AIResult:
         endpoint = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"{model}:generateContent"
         )
-        response = requests.post(
-            endpoint,
-            headers={
-                "x-goog-api-key": self.config.api_key,
-                "Content-Type": "application/json",
-            },
-            json={
-                "systemInstruction": {"parts": [{"text": instructions}]},
-                "contents": [{"role": "user", "parts": [{"text": input_text}]}],
-                "generationConfig": {
-                    "maxOutputTokens": self.config.max_output_tokens,
-                    "temperature": self.config.temperature,
+        try:
+            response = requests.post(
+                endpoint,
+                headers={
+                    "x-goog-api-key": self.config.api_key,
+                    "Content-Type": "application/json",
                 },
-            },
-            timeout=(10, self.config.timeout_seconds),
-        )
-        response.raise_for_status()
-        payload = response.json()
+                json={
+                    "systemInstruction": {"parts": [{"text": instructions}]},
+                    "contents": [{"role": "user", "parts": [{"text": input_text}]}],
+                    "generationConfig": {
+                        "maxOutputTokens": self.config.max_output_tokens,
+                        "temperature": self.config.temperature,
+                    },
+                },
+                timeout=(10, self.config.timeout_seconds),
+            )
+        except requests.Timeout as exc:
+            raise AIUnavailable(
+                f"Gemini request timed out after {self.config.timeout_seconds}s."
+            ) from exc
+        except requests.RequestException as exc:
+            raise AIUnavailable(
+                f"Gemini network request failed: {type(exc).__name__}: {str(exc)[:500]}"
+            ) from exc
+
+        if not response.ok:
+            raise self._gemini_error(response)
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AIUnavailable(
+                f"Gemini returned invalid JSON (HTTP {response.status_code})."
+            ) from exc
+
         parts = []
         for candidate in payload.get("candidates") or []:
             for part in (candidate.get("content") or {}).get("parts") or []:
@@ -103,8 +151,19 @@ class AIGateway:
         text = "\n".join(parts).strip()
         if not text:
             reason = (payload.get("promptFeedback") or {}).get("blockReason")
-            suffix = f" ({reason})" if reason else ""
+            finish_reasons = [
+                str(c.get("finishReason"))
+                for c in (payload.get("candidates") or [])
+                if c.get("finishReason")
+            ]
+            suffix_parts = []
+            if reason:
+                suffix_parts.append(f"blockReason={reason}")
+            if finish_reasons:
+                suffix_parts.append("finishReason=" + ",".join(finish_reasons))
+            suffix = f" ({'; '.join(suffix_parts)})" if suffix_parts else ""
             raise AIUnavailable(f"Gemini returned an empty response{suffix}.")
+
         usage = payload.get("usageMetadata") or {}
         input_tokens = usage.get("promptTokenCount")
         output_tokens = usage.get("candidatesTokenCount")
@@ -179,4 +238,6 @@ class AIGateway:
                 pass
             if isinstance(exc, AIUnavailable):
                 raise
-            raise AIUnavailable(f"AI request failed: {type(exc).__name__}") from exc
+            raise AIUnavailable(
+                f"AI request failed: {type(exc).__name__}: {str(exc)[:700]}"
+            ) from exc
