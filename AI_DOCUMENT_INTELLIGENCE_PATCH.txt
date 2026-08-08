@@ -1,0 +1,37 @@
+# AJAY AI DOCUMENT INTELLIGENCE — integration patch
+#
+# Apply these changes to commands/ai.py.
+#
+# 1. Add import:
+# from services.ai_document_intelligence_service import build_document_context
+#
+# 2. In _generate_case_brief(), immediately after:
+#       case_context = await asyncio.to_thread(knowledge.build_case_context, case_db_id)
+#    and after the existing `if not case_context` guard, add:
+#
+#       document_context, document_unavailable = await asyncio.to_thread(
+#           build_document_context, case_context.case_summary
+#       )
+#
+# IMPORTANT:
+# The exact CaseContext object shape must be checked before inserting the line
+# above. If `case_summary` has another attribute name, pass the CaseSummary
+# instance used by OfficeKnowledgeService instead.
+#
+# 3. Change the office_context argument from:
+#       office_context=case_context.to_prompt(),
+#    to:
+#       office_context=(
+#           case_context.to_prompt()
+#           + "\n\n"
+#           + document_context
+#       ),
+#
+# 4. Change:
+#       unavailable = list(case_context.unavailable_sources)
+#    to:
+#       unavailable = list(case_context.unavailable_sources) + document_unavailable
+#
+# This keeps AI grounded: if full document text/OCR is not indexed, Ajay AI is
+# explicitly told that it only has metadata and must not pretend to have read
+# the document.
