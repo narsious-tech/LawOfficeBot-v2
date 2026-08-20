@@ -48,6 +48,7 @@ ADMIN_COMMANDS = {
     "teststaffclosing", "testadwebcreatecase", "testadrealcase",
     "testemailalerts", "emailalertstatus", "testforgotcheckout",
     "testattendancesummary", "testloanreminders", "explore",
+    "activitystatus", "activityfeed",
 }
 
 ADMIN_CALLBACK_PREFIXES = ("ecr:", "ejg:", "loan:", "ajayai:")
