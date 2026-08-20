@@ -124,6 +124,8 @@ ITEMS = (
     MenuItem("sync", "🔄 Sync Cases", "synccases", "Synchronize Advocate Diaries cases.", "admin", "admin"),
     MenuItem("mobilesync", "🔄 Mobile-Aware Sync", "synccasesv3", "Synchronize Advocate Diaries client links and mobile data.", "admin", "admin"),
     MenuItem("emailtest", "🧪 Test Email Alerts", "testemailalerts", "Run the email monitor now.", "admin", "admin"),
+    MenuItem("activityfeed", "🔔 Staff Activity Feed", "activityfeed", "Every retained staff interaction with the bot.", "admin", "admin"),
+    MenuItem("activitystatus", "🛡 Activity Feed Status", "activitystatus", "Check private staff-monitoring delivery health.", "admin", "admin"),
     MenuItem("chatid", "🪪 My Telegram ID", "mychatid", "Show chat and user identifiers.", "admin"),
 )
 
