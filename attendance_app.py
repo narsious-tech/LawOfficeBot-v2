@@ -16,8 +16,18 @@ from config import DATABASE_URL
 from advocate_web import AdvocateWeb
 from services.whatsapp_cloud import (
     process_webhook as process_whatsapp_webhook,
+    send_button_message as send_whatsapp_buttons,
+    send_text_message as send_whatsapp_text,
     verify_challenge as verify_whatsapp_challenge,
     verify_signature as verify_whatsapp_signature,
+)
+from services.staff_activity_service import (
+    admin_activity_chat_id,
+    mark_activity_notification,
+)
+from services.whatsapp_staff_companion import (
+    handle_staff_inbound,
+    staff_companion_enabled,
 )
 
 
@@ -47,11 +57,31 @@ def _notify_whatsapp_inbound(item):
         f"💬 {item.get('text') or '-'}\n\n"
         "Open /whatsappinbox in the bot to review."
     )
-    requests.post(
+    response = requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        json={"chat_id": destination, "text": text},
-        timeout=15,
+        json={"chat_id": destination, "text": text}, timeout=15,
     )
+    response.raise_for_status()
+
+
+def _notify_whatsapp_staff(result):
+    destination = admin_activity_chat_id()
+    if not BOT_TOKEN or not destination:
+        return
+    staff = result.get("staff") or {}
+    text = (
+        "🔔 WHATSAPP STAFF ACTIVITY\n\n"
+        f"👤 {staff.get('staff_name') or 'Staff'}\n"
+        f"📱 +{result.get('phone') or '-'}\n"
+        f"💬 {result.get('incoming') or '-'}"
+    )
+    response = requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json={"chat_id": destination, "text": text}, timeout=15,
+    )
+    response.raise_for_status()
+    if result.get("activity_id"):
+        mark_activity_notification(int(result["activity_id"]))
 
 
 @attendance_app.get("/whatsapp/webhook")
@@ -76,9 +106,26 @@ def whatsapp_webhook_receive():
         alerts = process_whatsapp_webhook(payload)
         for item in alerts:
             try:
-                _notify_whatsapp_inbound(item)
+                result = (
+                    handle_staff_inbound(item)
+                    if staff_companion_enabled()
+                    else {"is_staff": False}
+                )
+                if result.get("is_staff"):
+                    if result.get("menu"):
+                        send_whatsapp_buttons(
+                            result["phone"], result["reply"],
+                            [("my_work", "My Work"),
+                             ("office_status", "Office Status"),
+                             ("help", "Help")],
+                        )
+                    else:
+                        send_whatsapp_text(result["phone"], result["reply"])
+                    _notify_whatsapp_staff(result)
+                else:
+                    _notify_whatsapp_inbound(item)
             except Exception:
-                attendance_app.logger.exception("WhatsApp Telegram alert failed")
+                attendance_app.logger.exception("WhatsApp companion processing failed")
         return jsonify({"status": "ok", "new_messages": len(alerts)}), 200
     except Exception:
         attendance_app.logger.exception("WhatsApp webhook processing failed")
