@@ -176,6 +176,27 @@ def ensure_ecourts_schema() -> None:
             CREATE INDEX IF NOT EXISTS idx_ecourts_changes_review
             ON ecourts_case_changes(review_status, severity, id DESC)
         """)
+        # Retire historical false positives such as "Consideration" versus
+        # "CONSIDERATION". This changes only the review queue/audit status;
+        # Office OS and Advocate Diaries values are never modified here.
+        cur.execute("""
+            UPDATE ecourts_case_changes
+            SET review_status='IGNORED_COSMETIC',
+                reviewed_at=COALESCE(reviewed_at, NOW()),
+                apply_message=COALESCE(
+                    apply_message,
+                    'Ignored automatically: cosmetic text formatting only.'
+                )
+            WHERE review_status='PENDING'
+              AND field_name IN (
+                  'purpose_name', 'court_designation', 'disposal_name'
+              )
+              AND LOWER(REGEXP_REPLACE(
+                    COALESCE(old_value, ''), '[^[:alnum:]]+', '', 'g'
+                  )) = LOWER(REGEXP_REPLACE(
+                    COALESCE(new_value, ''), '[^[:alnum:]]+', '', 'g'
+                  ))
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS ecourts_preparation_queue (
                 id BIGSERIAL PRIMARY KEY,
@@ -339,6 +360,26 @@ def _integer(value: Any) -> int | None:
 def _date(value: Any) -> str | None:
     text = str(value or "").strip()
     return text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else None
+
+
+_COSMETIC_TEXT_FIELDS = {
+    "purpose_name", "court_designation", "disposal_name",
+}
+
+
+def normalized_change_value(field_name: str, value: Any) -> str:
+    """Normalize only fields where formatting has no legal state meaning."""
+    text = "" if value is None else str(value).strip()
+    if field_name in _COSMETIC_TEXT_FIELDS:
+        return re.sub(r"[^A-Z0-9]+", "", text.upper())
+    return text
+
+
+def is_material_backup_change(field_name: str, before: Any, after: Any) -> bool:
+    """Return False for case/spacing/punctuation-only text differences."""
+    return normalized_change_value(field_name, before) != normalized_change_value(
+        field_name, after
+    )
 
 
 def inspect_backup_record(cino: str) -> dict[str, Any]:
@@ -738,10 +779,10 @@ def synchronize_backups(actor_id: int | None = None) -> dict[str, Any]:
             for field in tracked:
                 before = old.get(field)
                 after = current.get(field)
+                if not is_material_backup_change(field, before, after):
+                    continue
                 before_text = "" if before is None else str(before)
                 after_text = "" if after is None else str(after)
-                if before_text == after_text:
-                    continue
                 severity = "INFO"
                 if field in {"decision_date", "disposal_name"} and after_text:
                     severity = "CRITICAL"
