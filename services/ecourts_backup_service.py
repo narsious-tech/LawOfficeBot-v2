@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -267,6 +268,61 @@ def parse_backup(text: str, source_kind: str) -> list[dict[str, Any]]:
             "raw_payload": item,
         })
     return records
+
+
+def _backup_freshness(record: dict[str, Any], position: int) -> tuple:
+    """Return a stable ordering key for duplicate CNR backup rows.
+
+    eCourts backups can contain an older and a refreshed copy of the same CNR.
+    Prefer an explicit ``updated`` timestamp when present, then the row carrying
+    the most useful hearing/disposal information, and finally the later source
+    row.  The final position tie-breaker keeps the result deterministic.
+    """
+    payload = record.get("raw_payload")
+    updated = payload.get("updated") if isinstance(payload, dict) else None
+    updated_epoch = 0.0
+    if updated not in (None, ""):
+        text = str(updated).strip()
+        try:
+            normalized = text.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(normalized)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            updated_epoch = parsed.timestamp()
+        except (TypeError, ValueError, OverflowError):
+            # Some eCourts exports use a numeric Unix timestamp.
+            try:
+                updated_epoch = float(text)
+                if updated_epoch > 10_000_000_000:
+                    updated_epoch /= 1000.0
+            except (TypeError, ValueError, OverflowError):
+                updated_epoch = 0.0
+    useful_fields = sum(
+        record.get(field) not in (None, "")
+        for field in (
+            "last_hearing_date", "next_hearing_date", "decision_date",
+            "purpose_name", "disposal_name", "court_designation",
+            "petitioner_name", "respondent_name",
+        )
+    )
+    return (updated_epoch, useful_fields, position)
+
+
+def deduplicate_backup_records(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep exactly one deterministic, freshest record for every CNR."""
+    selected: dict[str, tuple[tuple, dict[str, Any]]] = {}
+    for position, record in enumerate(records):
+        cino = str(record.get("cino") or "").strip().upper()
+        if not cino:
+            continue
+        freshness = _backup_freshness(record, position)
+        current = selected.get(cino)
+        if current is None or freshness > current[0]:
+            selected[cino] = (freshness, record)
+    unique = [value[1] for value in selected.values()]
+    return unique, max(0, len(records) - len(unique))
 
 
 def _clean(value: Any) -> str:
@@ -640,7 +696,14 @@ def synchronize_backups(actor_id: int | None = None) -> dict[str, Any]:
         conn.commit()
         district = parse_backup(_download_text(DISTRICT_BACKUP_ID), "DISTRICT")
         high_court = parse_backup(_download_text(HIGH_COURT_BACKUP_ID), "HIGH_COURT")
-        records = district + high_court
+        raw_records = district + high_court
+        records, duplicate_count = deduplicate_backup_records(raw_records)
+        if duplicate_count:
+            logger.warning(
+                "eCourts backup contained %s duplicate CNR row(s); "
+                "freshest rows retained before upsert",
+                duplicate_count,
+            )
         cinos = [item["cino"] for item in records]
         existing: dict[str, dict[str, Any]] = {}
         if cinos:
@@ -775,6 +838,8 @@ def synchronize_backups(actor_id: int | None = None) -> dict[str, Any]:
             "district_count": len(district),
             "high_court_count": len(high_court),
             "total_backup_count": len(records),
+            "raw_backup_count": len(raw_records),
+            "duplicate_cnr_rows_ignored": duplicate_count,
             "change_count": len(detected_changes),
             "changes": detected_changes,
         })
