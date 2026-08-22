@@ -18,6 +18,13 @@ from services.whatsapp_cloud import (
     transport_ready,
     whatsapp_config,
 )
+from services.whatsapp_staff_companion import (
+    ensure_whatsapp_staff_schema,
+    link_staff_phone,
+    linked_staff_phones,
+    staff_companion_enabled,
+    unlink_staff_phone,
+)
 
 
 def _admin(user_id: int | None) -> bool:
@@ -44,6 +51,7 @@ async def whatsappstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     cfg = whatsapp_config()
     await asyncio.to_thread(ensure_whatsapp_schema)
+    staff_links = await asyncio.to_thread(linked_staff_phones)
     public_url = (
         os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
         or os.getenv("ATTENDANCE_APP_URL", "").strip()
@@ -60,11 +68,67 @@ async def whatsappstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Verify Token: {'Configured' if cfg['verify_token'] else 'Missing'}\n"
         f"App Secret: {'Configured' if cfg['app_secret'] else 'Optional / missing'}\n"
         f"Graph API: {html.escape(cfg['graph_version'])}\n\n"
+        f"Staff Companion: {'✅ Enabled' if staff_companion_enabled() else '⚠️ Disabled'}\n"
+        f"Linked staff numbers: {len(staff_links)}\n\n"
         f"Webhook URL:\n<code>{html.escape(webhook)}</code>\n\n"
         "Manual wa.me sending remains available as a fallback.",
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
+
+
+async def linkwhatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    if len(context.args) < 2:
+        await update.effective_message.reply_text(
+            "Usage: /linkwhatsapp 919876543210 Staff Name\n"
+            "Use the exact staff name shown by /linkedstaff."
+        )
+        return
+    try:
+        row = await asyncio.to_thread(
+            link_staff_phone, " ".join(context.args[1:]), context.args[0],
+            update.effective_user.id,
+        )
+        await update.effective_message.reply_text(
+            f"✅ WhatsApp linked\n\n👤 {row['staff_name']}\n📱 +{row['phone']}\n\n"
+            "The staff member may now send HI to the office WhatsApp number."
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(f"❌ Link failed: {exc}")
+
+
+async def unlinkwhatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /unlinkwhatsapp 919876543210")
+        return
+    try:
+        row = await asyncio.to_thread(
+            unlink_staff_phone, context.args[0], update.effective_user.id,
+        )
+        await update.effective_message.reply_text(
+            f"✅ WhatsApp unlinked\n\n👤 {row['staff_name']}\n📱 +{row['phone']}"
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(f"❌ Unlink failed: {exc}")
+
+
+async def whatsappstaff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    rows = await asyncio.to_thread(linked_staff_phones)
+    lines = ["👥 <b>WHATSAPP STAFF LINKS</b>", ""]
+    if not rows:
+        lines.append("No staff WhatsApp numbers are linked.")
+    for row in rows:
+        lines.append(
+            f"• <b>{html.escape(str(row['staff_name']))}</b> — "
+            f"+{html.escape(str(row['whatsapp_phone']))}"
+        )
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def testwhatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -132,10 +196,14 @@ async def retrywhatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def register_whatsapp_handlers(app) -> None:
     ensure_whatsapp_schema()
+    ensure_whatsapp_staff_schema()
     app.add_handler(CommandHandler("whatsappstatus", whatsappstatus), group=-8)
     app.add_handler(CommandHandler("testwhatsapp", testwhatsapp), group=-8)
     app.add_handler(CommandHandler("whatsappinbox", whatsappinbox), group=-8)
     app.add_handler(CommandHandler("retrywhatsapp", retrywhatsapp), group=-8)
+    app.add_handler(CommandHandler("linkwhatsapp", linkwhatsapp), group=-8)
+    app.add_handler(CommandHandler("unlinkwhatsapp", unlinkwhatsapp), group=-8)
+    app.add_handler(CommandHandler("whatsappstaff", whatsappstaff), group=-8)
 
 
 async def whatsapp_retry_job(context: ContextTypes.DEFAULT_TYPE):
