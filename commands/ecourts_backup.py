@@ -532,7 +532,9 @@ def _review_keyboard(item: dict) -> InlineKeyboardMarkup:
     ])
 
 
-def _group_review_keyboard(item: dict) -> InlineKeyboardMarkup:
+def _group_review_keyboard(
+    item: dict, page: int = 1, total_pages: int = 1
+) -> InlineKeyboardMarkup:
     run_id = int(item["sync_run_id"])
     cino = str(item["cino"])
     rows = []
@@ -540,28 +542,47 @@ def _group_review_keyboard(item: dict) -> InlineKeyboardMarkup:
         rows.append([
             InlineKeyboardButton(
                 "✅ Approve Case Update",
-                callback_data=f"ecr:groupapprove:{run_id}:{cino}",
+                callback_data=(
+                    f"ecr:groupconfirmapprove:{run_id}:{cino}:{page}"
+                ),
             ),
             InlineKeyboardButton(
                 "❌ Reject All",
-                callback_data=f"ecr:groupreject:{run_id}:{cino}",
+                callback_data=(
+                    f"ecr:groupconfirmreject:{run_id}:{cino}:{page}"
+                ),
             ),
         ])
     else:
         rows.append([
             InlineKeyboardButton(
                 "🗑 Acknowledge — Not Linked",
-                callback_data=f"ecr:groupreject:{run_id}:{cino}",
+                callback_data=(
+                    f"ecr:groupconfirmreject:{run_id}:{cino}:{page}"
+                ),
             ),
         ])
+    navigation = []
+    if page > 1:
+        navigation.append(InlineKeyboardButton(
+            "⬅️ Previous", callback_data=f"ecr:review:{page - 1}"
+        ))
+    if page < total_pages:
+        navigation.append(InlineKeyboardButton(
+            "Next ➡️", callback_data=f"ecr:review:{page + 1}"
+        ))
+    if navigation:
+        rows.append(navigation)
     rows.append([
-            InlineKeyboardButton("📥 Scan Order Inbox", callback_data="ecr:orderscan"),
-            InlineKeyboardButton("⬅️ eCourts Dashboard", callback_data="ecr:home"),
+        InlineKeyboardButton("📥 Scan Order Inbox", callback_data="ecr:orderscan"),
+        InlineKeyboardButton("⬅️ eCourts Dashboard", callback_data="ecr:home"),
     ])
     return InlineKeyboardMarkup(rows)
 
 
-def _group_change_text(item: dict) -> str:
+def _group_change_text(
+    item: dict, page: int | None = None, total_pages: int | None = None
+) -> str:
     severity_icon = {
         "CRITICAL": "🚨",
         "IMPORTANT": "⚠️",
@@ -569,10 +590,18 @@ def _group_change_text(item: dict) -> str:
     }.get(str(item.get("severity") or "INFO"), "ℹ️")
     lines = [
         f"{severity_icon} <b>eCOURTS CASE UPDATE — ADMIN DECISION</b>",
-        "",
+    ]
+    if page is not None and total_pages is not None:
+        lines.extend([
+            f"Review case <b>{page}</b> of <b>{total_pages}</b>",
+            "",
+        ])
+    else:
+        lines.append("")
+    lines.extend([
         f"⚖️ Case: <b>{html.escape(str(item.get('display_case_number') or '-'))}</b>",
         f"CNR: <code>{html.escape(str(item.get('cino') or '-'))}</code>",
-    ]
+    ])
     if item.get("case_title"):
         lines.append(f"Title: {html.escape(str(item['case_title']))}")
     if item.get("local_case_pk"):
@@ -648,26 +677,38 @@ def _operations_text(data: dict) -> str:
     )
 
 
-async def _send_pending_change(message) -> None:
-    rows = await asyncio.to_thread(list_ecourts_change_groups, 1, "PENDING")
+async def _send_pending_change(message, page: int = 1, edit: bool = False) -> None:
+    rows = await asyncio.to_thread(list_ecourts_change_groups, 100, "PENDING")
     if not rows:
-        await message.reply_text(
-            "✅ No eCourts changes are waiting for administrator review."
-        )
+        text = "✅ No eCourts changes are waiting for administrator review."
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("⬅️ eCourts Dashboard", callback_data="ecr:home")
+        ]])
+        if edit:
+            await message.edit_text(text, reply_markup=keyboard)
+        else:
+            await message.reply_text(text, reply_markup=keyboard)
         return
-    item = rows[0]
-    await message.reply_text(
-        _group_change_text(item)[:4096],
-        parse_mode=ParseMode.HTML,
-        reply_markup=_group_review_keyboard(item),
-        disable_web_page_preview=True,
-    )
+    total_pages = len(rows)
+    page = min(max(1, int(page or 1)), total_pages)
+    item = rows[page - 1]
+    kwargs = {
+        "text": _group_change_text(item, page, total_pages)[:4096],
+        "parse_mode": ParseMode.HTML,
+        "reply_markup": _group_review_keyboard(item, page, total_pages),
+        "disable_web_page_preview": True,
+    }
+    if edit:
+        await message.edit_text(**kwargs)
+    else:
+        await message.reply_text(**kwargs)
 
 
 async def ecourtsreview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _authorize(update):
         return
-    await _send_pending_change(update.effective_message)
+    page = int(context.args[0]) if context.args and context.args[0].isdigit() else 1
+    await _send_pending_change(update.effective_message, page)
 
 
 async def _send_possible_match(message) -> None:
@@ -921,18 +962,36 @@ async def _alert_changes(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     destinations = _admin_destinations()
     sent = False
+    critical = sum(
+        str(item.get("severity") or "").upper() == "CRITICAL"
+        for item in groups
+    )
+    important = sum(
+        str(item.get("severity") or "").upper() == "IMPORTANT"
+        for item in groups
+    )
+    alert_text = (
+        "🔔 <b>eCOURTS REVIEW QUEUE UPDATED</b>\n\n"
+        f"Cases awaiting review: <b>{len(groups)}</b>\n"
+        f"🚨 Critical: <b>{critical}</b>\n"
+        f"⚠️ Important: <b>{important}</b>\n\n"
+        "Open the paginated review desk to decide each case. "
+        "Office OS and Advocate Diaries remain unchanged until approval."
+    )
+    alert_keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🛡 Review Case Updates", callback_data="ecr:review:1")
+    ]])
     for destination in destinations:
-        for item in groups:
-            try:
-                await context.bot.send_message(
-                    chat_id=destination,
-                    text="🔔 " + _group_change_text(item)[:4000],
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
-                sent = True
-            except Exception:
-                logger.exception("Could not deliver eCourts change alert")
+        try:
+            await context.bot.send_message(
+                chat_id=destination,
+                text=alert_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=alert_keyboard,
+            )
+            sent = True
+        except Exception:
+            logger.exception("Could not deliver consolidated eCourts change alert")
     if sent:
         change_ids = [
             int(change_id)
@@ -1081,11 +1140,44 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
     if action == "review":
-        await _send_pending_change(query.message)
+        await _send_pending_change(query.message, page, edit=True)
         return
     if action == "workqueue":
         await asyncio.to_thread(generate_order_work_proposals, 10)
         await _send_work_proposal(query.message)
+        return
+    if action in {"groupconfirmapprove", "groupconfirmreject"}:
+        if (
+            len(parts) < 5
+            or not parts[2].isdigit()
+            or len(parts[3]) != 16
+            or not parts[4].isdigit()
+        ):
+            await query.message.reply_text("❌ Invalid grouped eCourts review reference.")
+            return
+        run_id, cino, review_page = int(parts[2]), parts[3], int(parts[4])
+        approve = action == "groupconfirmapprove"
+        decision_label = "APPROVE AND APPLY" if approve else "REJECT / ACKNOWLEDGE"
+        await query.edit_message_text(
+            "⚠️ <b>CONFIRM eCOURTS DECISION</b>\n\n"
+            f"Case: <b>{html.escape(cino)}</b>\n"
+            f"Decision: <b>{decision_label}</b>\n\n"
+            "This decision applies to every pending field shown for this case. "
+            "Do you want to continue?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "✅ Yes, Continue" if approve else "✅ Yes, Reject/Acknowledge",
+                    callback_data=(
+                        f"ecr:{'groupapprove' if approve else 'groupreject'}:"
+                        f"{run_id}:{cino}:{review_page}"
+                    ),
+                )],
+                [InlineKeyboardButton(
+                    "❌ Cancel", callback_data=f"ecr:review:{review_page}"
+                )],
+            ]),
+        )
         return
     if action in {"groupapprove", "groupreject"}:
         if (
@@ -1095,6 +1187,11 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ):
             await query.message.reply_text("❌ Invalid grouped eCourts review reference.")
             return
+        review_page = (
+            int(parts[4])
+            if len(parts) > 4 and parts[4].isdigit()
+            else 1
+        )
         try:
             result = await asyncio.to_thread(
                 review_ecourts_change_group,
@@ -1142,8 +1239,16 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{integration_lines}"
                 ),
                 parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "➡️ Continue Pending Review",
+                        callback_data=f"ecr:review:{review_page}",
+                    ),
+                    InlineKeyboardButton(
+                        "⬅️ Dashboard", callback_data="ecr:home"
+                    ),
+                ]]),
             )
-            await _send_pending_change(query.message)
             if new_proposals:
                 await _send_work_proposal(query.message)
         except Exception as exc:
