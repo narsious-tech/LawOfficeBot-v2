@@ -159,6 +159,43 @@ def send_text_message(phone: str, text: str) -> dict[str, Any]:
     return {"provider_message_id": provider_id, "response": payload}
 
 
+def send_button_message(
+    phone: str, body: str, buttons: list[tuple[str, str]]
+) -> dict[str, Any]:
+    """Send up to three reply buttons inside the open customer-service window."""
+    cfg = whatsapp_config()
+    if not transport_ready():
+        raise RuntimeError("WhatsApp Cloud API configuration is incomplete.")
+    choices = [
+        {"type": "reply", "reply": {"id": key[:256], "title": title[:20]}}
+        for key, title in buttons[:3]
+    ]
+    response = requests.post(
+        _graph_url(),
+        headers={
+            "Authorization": f"Bearer {cfg['access_token']}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "messaging_product": "whatsapp", "to": normalize_phone(phone),
+            "type": "interactive",
+            "interactive": {
+                "type": "button", "body": {"text": body[:1024]},
+                "action": {"buttons": choices},
+            },
+        },
+        timeout=30,
+    )
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400:
+        message = ((payload.get("error") or {}).get("message")) or f"HTTP {response.status_code}"
+        raise RuntimeError(f"Meta rejected the interactive message: {message}")
+    provider_id = ((payload.get("messages") or [{}])[0]).get("id")
+    if not provider_id:
+        raise RuntimeError("Meta accepted the buttons without returning a message ID.")
+    return {"provider_message_id": provider_id, "response": payload}
+
+
 def send_template_message(
     phone: str, template_name: str, body_value: str, language: str = "en"
 ) -> dict[str, Any]:
@@ -395,6 +432,7 @@ def process_webhook(payload: dict[str, Any]) -> list[dict[str, Any]]:
                             ((message.get("text") or {}).get("body"))
                             or ((message.get("button") or {}).get("text"))
                             or ((message.get("interactive") or {}).get("button_reply") or {}).get("title")
+                            or ((message.get("interactive") or {}).get("list_reply") or {}).get("title")
                             or f"[{kind} message]"
                         )
                         case_id = _find_case_for_phone(cur, phone)
