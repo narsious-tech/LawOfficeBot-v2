@@ -27,7 +27,10 @@ drive.get_drive_service = lambda: None
 drive.ROOT_FOLDER_ID = "test"
 sys.modules.setdefault("utils.drive", drive)
 
-from services.ecourts_backup_service import deduplicate_backup_records
+from services.ecourts_backup_service import (
+    deduplicate_backup_records,
+    is_material_backup_change,
+)
 
 
 def _record(cino, updated, next_date=None, purpose=None):
@@ -47,6 +50,34 @@ def _record(cino, updated, next_date=None, purpose=None):
 
 
 class ECourtsBackupDeduplicationTests(unittest.TestCase):
+    def test_purpose_capitalization_is_not_a_change(self):
+        self.assertFalse(
+            is_material_backup_change(
+                "purpose_name", "Consideration", "CONSIDERATION"
+            )
+        )
+
+    def test_purpose_spacing_and_punctuation_are_not_changes(self):
+        self.assertFalse(
+            is_material_backup_change(
+                "purpose_name", "Defendant Evidence", "DEFENDANT-EVIDENCE"
+            )
+        )
+
+    def test_genuinely_different_purpose_is_a_change(self):
+        self.assertTrue(
+            is_material_backup_change(
+                "purpose_name", "Consideration", "Arguments"
+            )
+        )
+
+    def test_hearing_date_change_remains_material(self):
+        self.assertTrue(
+            is_material_backup_change(
+                "next_hearing_date", "2026-08-12", "2026-09-09"
+            )
+        )
+
     def test_newest_duplicate_cnr_is_retained(self):
         old = _record("PBLD020092092019", "2026-08-20T08:00:00Z", "2026-08-11")
         new = _record("PBLD020092092019", "2026-08-21T08:00:00Z", "2026-09-15")
