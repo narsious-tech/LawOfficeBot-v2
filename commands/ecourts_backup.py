@@ -125,7 +125,13 @@ def _summary(data: dict) -> str:
         f"Last run: <b>{status}</b>\n"
         f"District backup: <b>{data.get('district_count', 0)}</b>\n"
         f"High Court backup: <b>{data.get('high_court_count', 0)}</b>\n\n"
-        f"✅ Matched: <b>{data.get('matched_count', 0)}</b>\n"
+        + (
+            f"🧹 Duplicate CNR rows safely consolidated: "
+            f"<b>{data.get('duplicate_cnr_rows_ignored', 0)}</b>\n\n"
+            if data.get("duplicate_cnr_rows_ignored")
+            else ""
+        )
+        + f"✅ Matched: <b>{data.get('matched_count', 0)}</b>\n"
         f"🟠 Possible matches: <b>{data.get('possible_count', 0)}</b>\n"
         f"🔴 No backup candidate found: <b>{data.get('no_candidate_count', 0)}</b>\n"
         f"🔵 Backup cases missing from Office OS: <b>{data.get('backup_only_count', 0)}</b>\n"
