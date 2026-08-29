@@ -21,17 +21,31 @@ import psycopg2
 from config import DATABASE_URL
 import os
 from datetime import datetime
+import asyncio
+import logging
 from utils.attendance_webapp import get_attendance_app_url
 from bs4 import BeautifulSoup
 
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
+logger = logging.getLogger(__name__)
 
 
 async def monitor_attendance_job(context):
     date = datetime.today().strftime("%Y-%m-%d")
 
-    response = web.attendance(date)
+    try:
+        # Advocate Diaries is external and can be slow.  Keep its blocking HTTP
+        # work off Telegram's event loop so email/WhatsApp jobs remain timely.
+        response = await asyncio.to_thread(web.attendance, date)
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning(
+            "Attendance monitor skipped; Advocate Diaries unavailable: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return
     soup = BeautifulSoup(response.text, "lxml")
 
     tbody = soup.find("tbody")
