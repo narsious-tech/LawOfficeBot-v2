@@ -4091,24 +4091,17 @@ app.job_queue.run_repeating(
     name="advocate_diaries_hearing_writeback_retry",
 )
 
-app.job_queue.run_repeating(
-    ecourts_backup_sync_job,
-    interval=max(3600, int(os.getenv("ECOURTS_BACKUP_SYNC_HOURS", "6")) * 3600),
-    first=180,
-    name="ecourts_drive_backup_reconciliation",
-)
-
-app.job_queue.run_repeating(
-    ecourts_order_inbox_job,
-    interval=max(300, int(os.getenv("ECOURTS_ORDER_POLL_SECONDS", "900"))),
-    first=240,
-    name="ecourts_drive_order_inbox",
-)
-
+# Low-cost mode: reconcile only the free Google Drive eCourts backups once on
+# the following morning.  The former recurring Order Inbox job called the paid
+# CASE_DETAIL API and is intentionally not scheduled.
 app.job_queue.run_daily(
-    ecourts_daily_operations_job,
-    time=time(hour=8, minute=35, tzinfo=ZoneInfo("Asia/Kolkata")),
-    name="ecourts_admin_operations_835am",
+    ecourts_backup_sync_job,
+    time=time(
+        hour=max(0, min(23, int(os.getenv("ECOURTS_BACKUP_SYNC_HOUR_IST", "7")))),
+        minute=max(0, min(59, int(os.getenv("ECOURTS_BACKUP_SYNC_MINUTE_IST", "30")))),
+        tzinfo=ZoneInfo("Asia/Kolkata"),
+    ),
+    name="ecourts_drive_backup_next_day_reconciliation",
 )
 
 app.job_queue.run_repeating(
