@@ -40,9 +40,20 @@ def _api_key() -> str:
 
 
 def api_enabled() -> bool:
-    return bool(_api_key()) and os.getenv(
-        "ECOURTSINDIA_API_ENABLED", "false"
-    ).strip().lower() in {"1", "true", "yes", "on"}
+    """Require a separate cost-consent flag before any paid API request.
+
+    Keeping the historical API key in Railway must never restart chargeable
+    CASE_DETAIL scans accidentally.  Paid access now requires both flags.
+    """
+    enabled = os.getenv("ECOURTSINDIA_API_ENABLED", "false").strip().lower()
+    paid_allowed = os.getenv(
+        "ECOURTSINDIA_PAID_API_ALLOWED", "false"
+    ).strip().lower()
+    return (
+        bool(_api_key())
+        and enabled in {"1", "true", "yes", "on"}
+        and paid_allowed in {"1", "true", "yes", "on"}
+    )
 
 
 def ensure_api_schema() -> None:
