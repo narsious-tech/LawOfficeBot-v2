@@ -1,5 +1,7 @@
 import requests
 import io
+import os
+import time
 from pypdf import PdfReader
 from bs4 import BeautifulSoup
 
@@ -7,6 +9,9 @@ from config import AD_EMAIL, AD_PASSWORD
 
 
 BASE_URL = "https://advocatediaries.com"
+AD_CONNECT_TIMEOUT = max(1, int(os.getenv("AD_CONNECT_TIMEOUT_SECONDS", "10")))
+AD_READ_TIMEOUT = max(1, int(os.getenv("AD_READ_TIMEOUT_SECONDS", "45")))
+AD_READ_RETRIES = max(0, int(os.getenv("AD_READ_RETRIES", "2")))
 
 
 class AdvocateWeb:
@@ -17,11 +22,24 @@ class AdvocateWeb:
         self.password = password or AD_PASSWORD
         self.logged_in = False
 
+    def _request(self, method, url, *, retry_read=False, **kwargs):
+        """Issue a bounded request; retry only explicitly safe read operations."""
+        kwargs.setdefault("timeout", (AD_CONNECT_TIMEOUT, AD_READ_TIMEOUT))
+        attempts = 1 + (AD_READ_RETRIES if retry_read else 0)
+        for attempt in range(attempts):
+            try:
+                return self.session.request(method, url, **kwargs)
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt + 1 >= attempts:
+                    raise
+                # Keep retries short.  Scheduled jobs must not block unrelated work.
+                time.sleep(min(2 ** attempt, 4))
+
 
     def login(self):
 
-        response = self.session.get(
-            f"{BASE_URL}/auth/login"
+        response = self._request(
+            "GET", f"{BASE_URL}/auth/login", retry_read=True
         )
 
         soup = BeautifulSoup(
@@ -53,8 +71,8 @@ class AdvocateWeb:
             "Origin": BASE_URL
         }
 
-        response = self.session.post(
-            f"{BASE_URL}/auth/login",
+        response = self._request(
+            "POST", f"{BASE_URL}/auth/login",
             data=payload,
             headers=headers,
             allow_redirects=True
@@ -78,10 +96,11 @@ class AdvocateWeb:
 
     def get(self, path, params=None):
         self.ensure_login()
-        response = self.session.get(
-            f"{BASE_URL}{path}",
+        response = self._request(
+            "GET", f"{BASE_URL}{path}",
             params=params,
-            allow_redirects=True
+            allow_redirects=True,
+            retry_read=True
         )
 
         # Advocate Diaries redirects an expired authenticated session to the
@@ -91,10 +110,11 @@ class AdvocateWeb:
         if self._is_login_response(response):
             self.logged_in = False
             self.login()
-            response = self.session.get(
-                f"{BASE_URL}{path}",
+            response = self._request(
+                "GET", f"{BASE_URL}{path}",
                 params=params,
-                allow_redirects=True
+                allow_redirects=True,
+                retry_read=True
             )
 
         return response
@@ -136,8 +156,8 @@ class AdvocateWeb:
 
         self.ensure_login()
 
-        response = self.session.get(
-            f"{BASE_URL}/attendance/search-day-attendance",
+        response = self._request(
+            "GET", f"{BASE_URL}/attendance/search-day-attendance",
             params={
                 "attendance_date": date
             },
@@ -145,7 +165,8 @@ class AdvocateWeb:
                 "X-Requested-With": "XMLHttpRequest",
                 "Referer": f"{BASE_URL}/attendance"
             },
-            allow_redirects=True
+            allow_redirects=True,
+            retry_read=True
         )
 
         return response
@@ -391,14 +412,15 @@ class AdvocateWeb:
         """
         self.ensure_login()
 
-        response = self.session.get(
-            f"{BASE_URL}/dashboard/download-day-cases-pdf",
+        response = self._request(
+            "GET", f"{BASE_URL}/dashboard/download-day-cases-pdf",
             params={"date": date},
             headers={
                 "Referer": f"{BASE_URL}/dashboard"
             },
             allow_redirects=True,
-            timeout=90
+            timeout=(AD_CONNECT_TIMEOUT, 90),
+            retry_read=True
         )
 
         response.raise_for_status()

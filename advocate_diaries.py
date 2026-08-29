@@ -1,9 +1,13 @@
 import os
 import requests
+import time
 
 BASE_URL = (os.getenv("AD_API") or "").rstrip("/")
 EMAIL = os.getenv("AD_EMAIL")
 PASSWORD = os.getenv("AD_PASSWORD")
+AD_CONNECT_TIMEOUT = max(1, int(os.getenv("AD_CONNECT_TIMEOUT_SECONDS", "10")))
+AD_API_READ_TIMEOUT = max(1, int(os.getenv("AD_API_READ_TIMEOUT_SECONDS", "90")))
+AD_READ_RETRIES = max(0, int(os.getenv("AD_READ_RETRIES", "2")))
 
 
 class AdvocateDiaries:
@@ -11,6 +15,18 @@ class AdvocateDiaries:
     def __init__(self):
         self.access_token = None
         self.refresh_token = None
+
+    @staticmethod
+    def _read(url, **kwargs):
+        """Retry safe API reads on transient connection and timeout failures."""
+        kwargs.setdefault("timeout", (AD_CONNECT_TIMEOUT, AD_API_READ_TIMEOUT))
+        for attempt in range(AD_READ_RETRIES + 1):
+            try:
+                return requests.get(url, **kwargs)
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt >= AD_READ_RETRIES:
+                    raise
+                time.sleep(min(2 ** attempt, 4))
 
     def login(self):
 
@@ -59,13 +75,13 @@ class AdvocateDiaries:
 
     def daily_cause_list(self, date):
 
-        response = requests.get(
+        response = self._read(
             f"{BASE_URL}/court_cases/daily_cause_list",
             params={
                 "date": date
             },
             headers=self.headers(),
-            timeout=(10, 90)
+            timeout=(AD_CONNECT_TIMEOUT, AD_API_READ_TIMEOUT)
         )
         response.raise_for_status()
 
