@@ -4,7 +4,9 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -17,6 +19,7 @@ from services.staff_activity_service import (
 from services.whatsapp_cloud import normalize_phone
 
 CLOSED = ("COMPLETED", "COMPLETE", "DONE", "CLOSED", "CANCELLED", "VERIFIED")
+IST = ZoneInfo("Asia/Kolkata")
 
 
 def staff_companion_enabled() -> bool:
@@ -28,16 +31,26 @@ def staff_companion_enabled() -> bool:
 def classify_staff_command(text: str) -> tuple[str, str]:
     command = re.sub(r"\s+", " ", str(text or "")).strip()
     upper = command.upper()
-    if upper in {"MENU", "HI", "HELLO", "START", "HELP", "/START"}:
+    if upper in {"MENU", "HI", "HELLO", "START", "/START"}:
         return "MENU", ""
-    if upper in {"MY WORK", "WORK", "MYWORK", "TASKS"}:
+    if upper in {"HELP", "HOW TO USE"}:
+        return "HELP", ""
+    if upper in {"MY WORK", "WORK", "MYWORK", "TASKS", "MY TASKS"}:
         return "MY_WORK", ""
     if upper in {"OFFICE STATUS", "STATUS", "MY STATUS"}:
         return "OFFICE_STATUS", ""
+    if upper in {"TODAY", "TODAY HEARINGS", "TODAY'S HEARINGS", "HEARINGS TODAY"}:
+        return "TODAY_HEARINGS", ""
+    if upper in {"TOMORROW", "TOMORROW HEARINGS", "TOMORROW'S HEARINGS", "HEARINGS TOMORROW"}:
+        return "TOMORROW_HEARINGS", ""
+    if upper in {"CASE SEARCH", "SEARCH CASE"}:
+        return "CASE_PROMPT", ""
     if upper.startswith("CASE "):
         return "CASE", command[5:].strip()
+    if upper in {"ATTENDANCE", "ATTENDANCE STATUS", "MY ATTENDANCE"}:
+        return "ATTENDANCE_STATUS", ""
     if upper in {"CHECK IN", "CHECKIN", "CHECK OUT", "CHECKOUT"}:
-        return "ATTENDANCE", ""
+        return "ATTENDANCE_ACTION", ""
     return "MENU", ""
 
 
@@ -238,8 +251,35 @@ def _office_status(cur, staff: dict[str, Any]) -> str:
         f"📋 Pending work: {pending}\n"
         f"🔴 Overdue: {overdue}\n"
         f"🕒 Attendance: {attendance}\n\n"
-        "Attendance actions and administrative controls remain in Telegram."
+        "Send MENU to open the staff menu."
     )
+
+
+def _attendance_status(cur, staff: dict[str, Any]) -> str:
+    cur.execute("SELECT to_regclass('public.attendance_sessions')")
+    if not cur.fetchone()[0]:
+        return "🕒 ATTENDANCE\n\nAttendance records are not available."
+    cur.execute("""
+        SELECT checkin_time,checkout_time FROM attendance_sessions
+        WHERE telegram_user_id=%s AND attendance_date=CURRENT_DATE
+        LIMIT 1
+    """, (staff["telegram_user_id"],))
+    row = cur.fetchone()
+    if not row:
+        return "🕒 ATTENDANCE\n\nYou have not checked in today."
+    if row[1]:
+        return f"🕒 ATTENDANCE\n\n✅ Checked in: {row[0]}\n🏁 Checked out: {row[1]}"
+    return f"🕒 ATTENDANCE\n\n✅ Present\nChecked in: {row[0]}\nCheckout is pending."
+
+
+def _hearing_replies(days_ahead: int) -> list[str]:
+    from services.staff_hearing_service import (
+        fetch_staff_hearings,
+        hearing_message_chunks,
+    )
+
+    target = (datetime.now(IST) + timedelta(days=days_ahead)).date()
+    return hearing_message_chunks(fetch_staff_hearings(target))
 
 
 def _case_lookup(cur, query: str) -> str:
@@ -271,9 +311,32 @@ def _case_lookup(cur, query: str) -> str:
 def menu_text(staff_name: str) -> str:
     return (
         f"🏛 LAW OFFICE OF AJAY CHAWLA\n\nWelcome, {staff_name}.\n"
-        "Choose a button below or send:\n"
-        "• MY WORK\n• OFFICE STATUS\n• CASE <number/title>\n• HELP\n\n"
-        "Telegram remains the secure Command Centre for updates and approvals."
+        "Open the Office Menu below. You can also type CASE followed by a "
+        "case number or title."
+    )
+
+
+def menu_rows() -> list[tuple[str, str, str]]:
+    return [
+        ("today_hearings", "Today Hearings", "Today's Advocate Diaries cause list"),
+        ("tomorrow_hearings", "Tomorrow Hearings", "Tomorrow's cause list"),
+        ("my_work", "My Work", "Your pending Office OS work"),
+        ("office_status", "Office Status", "Pending, overdue and attendance"),
+        ("attendance_status", "Attendance Status", "Your attendance today"),
+        ("case_search", "Case Search", "Find a case by number or title"),
+        ("help", "Help", "Commands and usage"),
+    ]
+
+
+def help_text() -> str:
+    return (
+        "ℹ️ WHATSAPP STAFF HELP\n\n"
+        "Use MENU for the full office menu.\n"
+        "Search: CASE CS/123/2026 or CASE party name\n"
+        "Hearings: TODAY HEARINGS or TOMORROW HEARINGS\n"
+        "Work: MY WORK\n"
+        "Attendance: ATTENDANCE STATUS\n\n"
+        "Updates and approvals remain protected during the pilot."
     )
 
 
@@ -290,21 +353,43 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
                 return {"is_staff": False}
             action, argument = classify_staff_command(incoming)
             menu = action == "MENU"
+            replies: list[str]
             if action == "MENU":
                 reply = menu_text(staff["staff_name"])
+                replies = [reply]
+            elif action == "HELP":
+                reply = help_text()
+                replies = [reply]
             elif action == "MY_WORK":
                 reply = _my_work(cur, staff["staff_name"])
+                replies = [reply]
             elif action == "OFFICE_STATUS":
                 reply = _office_status(cur, staff)
+                replies = [reply]
+            elif action == "ATTENDANCE_STATUS":
+                reply = _attendance_status(cur, staff)
+                replies = [reply]
+            elif action == "TODAY_HEARINGS":
+                replies = _hearing_replies(0)
+                reply = replies[0]
+            elif action == "TOMORROW_HEARINGS":
+                replies = _hearing_replies(1)
+                reply = replies[0]
+            elif action == "CASE_PROMPT":
+                reply = "🔎 Send CASE followed by the case number or party name.\nExample: CASE CS/3848/2025"
+                replies = [reply]
             elif action == "CASE":
                 reply = _case_lookup(cur, argument)
-            elif action == "ATTENDANCE":
+                replies = [reply]
+            elif action == "ATTENDANCE_ACTION":
                 reply = (
-                    "📍 Attendance requires verified office location. "
-                    "Please use Check In / Check Out in the Telegram bot."
+                    "📍 WhatsApp check-in/out will be enabled after the pilot's "
+                    "location-verification step. Send ATTENDANCE STATUS to view today."
                 )
+                replies = [reply]
             else:
                 reply = menu_text(staff["staff_name"])
+                replies = [reply]
                 menu = True
     finally:
         conn.close()
@@ -326,6 +411,7 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
         metadata={"phone": phone, "provider_message_id": item.get("provider_message_id")},
     )
     return {
-        "is_staff": True, "staff": staff, "reply": reply, "menu": menu,
+        "is_staff": True, "staff": staff, "reply": reply, "replies": replies,
+        "menu": menu, "menu_rows": menu_rows() if menu else [],
         "activity_id": activity_id, "incoming": incoming, "phone": phone,
     }

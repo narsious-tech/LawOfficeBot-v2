@@ -25,7 +25,7 @@ def whatsapp_config() -> dict[str, Any]:
         "access_token": os.getenv("WHATSAPP_ACCESS_TOKEN", "").strip(),
         "verify_token": os.getenv("WHATSAPP_VERIFY_TOKEN", "").strip(),
         "app_secret": os.getenv("WHATSAPP_APP_SECRET", "").strip(),
-        "graph_version": os.getenv("WHATSAPP_GRAPH_VERSION", "v23.0").strip(),
+        "graph_version": os.getenv("WHATSAPP_GRAPH_VERSION", "v26.0").strip(),
     }
 
 
@@ -193,6 +193,57 @@ def send_button_message(
     provider_id = ((payload.get("messages") or [{}])[0]).get("id")
     if not provider_id:
         raise RuntimeError("Meta accepted the buttons without returning a message ID.")
+    return {"provider_message_id": provider_id, "response": payload}
+
+
+def send_list_message(
+    phone: str,
+    body: str,
+    button_text: str,
+    rows: list[tuple[str, str, str]],
+) -> dict[str, Any]:
+    """Send a compact staff menu with up to ten list rows."""
+    cfg = whatsapp_config()
+    if not transport_ready():
+        raise RuntimeError("WhatsApp Cloud API configuration is incomplete.")
+    choices = [
+        {
+            "id": key[:200],
+            "title": title[:24],
+            "description": description[:72],
+        }
+        for key, title, description in rows[:10]
+    ]
+    if not choices:
+        raise ValueError("At least one WhatsApp menu row is required.")
+    response = requests.post(
+        _graph_url(),
+        headers={
+            "Authorization": f"Bearer {cfg['access_token']}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "messaging_product": "whatsapp",
+            "to": normalize_phone(phone),
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "body": {"text": body[:1024]},
+                "action": {
+                    "button": button_text[:20],
+                    "sections": [{"title": "Office Menu", "rows": choices}],
+                },
+            },
+        },
+        timeout=30,
+    )
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400:
+        message = ((payload.get("error") or {}).get("message")) or f"HTTP {response.status_code}"
+        raise RuntimeError(f"Meta rejected the list message: {message}")
+    provider_id = ((payload.get("messages") or [{}])[0]).get("id")
+    if not provider_id:
+        raise RuntimeError("Meta accepted the menu without returning a message ID.")
     return {"provider_message_id": provider_id, "response": payload}
 
 
