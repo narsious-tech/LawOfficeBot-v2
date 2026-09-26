@@ -107,11 +107,17 @@ class WhatsAppStaffCompanionTests(unittest.TestCase):
         self.assertIn("2026-10-01", message)
 
     def test_office_status_reads_named_counts_and_attendance(self):
-        cur = FakeCursor(fetchone_rows=[
-            {"pending_count": 3, "overdue_count": 1},
-            {"attendance_table": "attendance_sessions"},
-            {"checkin_time": "09:30", "checkout_time": None},
-        ])
+        cur = FakeCursor(
+            fetchone_rows=[
+                {"attendance_table": "attendance_sessions"},
+                {"checkin_time": "09:30", "checkout_time": None},
+            ],
+            fetchall_rows=[[
+                {"due_at": None, "deadline": "05-05-2025"},
+                {"due_at": "2999-01-01", "deadline": None},
+                {"due_at": None, "deadline": "Not fixed"},
+            ]],
+        )
         message = _office_status(
             cur, {"telegram_user_id": 123, "staff_name": "Preet"}
         )
