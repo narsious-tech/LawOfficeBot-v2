@@ -5,12 +5,12 @@ import types
 import unittest
 from unittest.mock import patch
 
-psycopg2 = types.ModuleType("psycopg2")
-extras = types.ModuleType("psycopg2.extras")
+psycopg2 = sys.modules.get("psycopg2") or types.ModuleType("psycopg2")
+extras = sys.modules.get("psycopg2.extras") or types.ModuleType("psycopg2.extras")
 extras.RealDictCursor = object
 psycopg2.extras = extras
-sys.modules.setdefault("psycopg2", psycopg2)
-sys.modules.setdefault("psycopg2.extras", extras)
+sys.modules["psycopg2"] = psycopg2
+sys.modules["psycopg2.extras"] = extras
 
 config = types.ModuleType("config")
 config.DATABASE_URL = "postgresql://unused"
@@ -23,6 +23,7 @@ sys.modules.setdefault("services.staff_activity_service", activity)
 
 cloud = types.ModuleType("services.whatsapp_cloud")
 cloud.normalize_phone = lambda value: "".join(c for c in str(value) if c.isdigit())
+cloud.send_text_message = lambda phone, text: {"provider_message_id": "wamid.test"}
 sys.modules.setdefault("services.whatsapp_cloud", cloud)
 
 from services.whatsapp_owner_companion import (  # noqa: E402
@@ -30,6 +31,7 @@ from services.whatsapp_owner_companion import (  # noqa: E402
     classify_owner_command,
     handle_owner_inbound,
     link_owner_phone,
+    match_tagged_staff,
 )
 
 
@@ -124,6 +126,28 @@ class OwnerTests(unittest.TestCase):
         self.assertEqual(classify_owner_command("Staff Activity"), ("ACTIVITY", ""))
         self.assertEqual(classify_owner_command("case CS/2112/2022"),
                          ("CASE", "CS/2112/2022"))
+
+    def test_owner_messaging_commands_are_explicit(self):
+        self.assertEqual(classify_owner_command("MESSAGE STAFF"), ("MESSAGE", ""))
+        self.assertEqual(
+            classify_owner_command("BROADCAST Meeting at 5 PM"),
+            ("BROADCAST", "Meeting at 5 PM"),
+        )
+        self.assertEqual(classify_owner_command("cancel"), ("CANCEL", ""))
+
+    def test_tagged_staff_uses_longest_exact_name(self):
+        rows = [
+            {"staff_name": "Preet", "whatsapp_phone": "911"},
+            {"staff_name": "Preet Office", "whatsapp_phone": "922"},
+        ]
+        matched = match_tagged_staff("@Preet Office Please bring the file", rows)
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched[0]["whatsapp_phone"], "922")
+        self.assertEqual(matched[1], "Please bring the file")
+
+    def test_partial_tag_does_not_match(self):
+        rows = [{"staff_name": "Happy", "whatsapp_phone": "933"}]
+        self.assertIsNone(match_tagged_staff("@Happyness hello", rows))
 
 
 if __name__ == "__main__":
