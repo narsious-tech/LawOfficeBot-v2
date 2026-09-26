@@ -5,7 +5,9 @@
 - Staff command `MORNING DASHBOARD`: private priorities and assigned-work brief.
 - Staff command `EVENING DASHBOARD`: private day-closing accountability board.
 - Owner command `MORNING`: full owner command-centre dashboard.
-- Owner command `EVENING`: tomorrow's hearing overview from Advocate Diaries.
+- Owner command `EVENING`: next court working day's hearing overview from Advocate Diaries.
+- Weekend handling: Saturday/Sunday dashboards automatically target Monday; Friday
+  also skips a second/fourth-Saturday court holiday under the shared office calendar.
 - Owner command `LIVE`: paginated live-hearing board (eight hearings per page).
 - Owner command `LIVE REFRESH`: refresh from Advocate Diaries, then open the board.
 - Owner-only status changes: Called, Passed Over, Adjourned, Order Reserved and Reset Listed.
