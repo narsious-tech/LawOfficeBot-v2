@@ -117,10 +117,30 @@ class OwnerTests(unittest.TestCase):
             "deadline": "05-05-2025",
             "due_at": None,
         }])
-        message = _owner_work(cursor)
+        message, page, total_pages = _owner_work(cursor)
+        self.assertEqual((page, total_pages), (1, 1))
         self.assertIn("Asha Rani versus Mohan Lal", message)
         self.assertIn("CS/3712/2018", message)
         self.assertNotIn("⚖️ CS/3712/2018", message)
+
+    def test_owner_work_second_page_contains_remaining_items(self):
+        rows = [{
+            "task_id": number,
+            "staff_name": "Happy",
+            "task_text": f"Work {number}",
+            "case_number": f"CS/{number}/2026",
+            "case_title": f"Case Title {number}",
+            "deadline": None,
+            "due_at": f"2026-10-{number:02d}",
+        } for number in range(1, 16)]
+        cursor = Cursor(task_rows=rows)
+        message, page, total_pages = _owner_work(cursor, 2)
+        self.assertEqual((page, total_pages), (2, 2))
+        self.assertIn("Showing 11-15 of 15", message)
+        self.assertIn("Page 2 of 2", message)
+
+    def test_owner_work_page_command(self):
+        self.assertEqual(classify_owner_command("WORK 2"), ("WORK", "2"))
 
     def test_owner_link_requires_telegram_admin(self):
         with patch.dict(os.environ, {"ADMIN_USER_ID": "12345"}):
