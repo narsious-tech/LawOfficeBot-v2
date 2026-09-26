@@ -17,6 +17,7 @@ from advocate_web import AdvocateWeb
 from services.whatsapp_cloud import (
     process_webhook as process_whatsapp_webhook,
     send_button_message as send_whatsapp_buttons,
+    send_list_message as send_whatsapp_list,
     send_text_message as send_whatsapp_text,
     verify_challenge as verify_whatsapp_challenge,
     verify_signature as verify_whatsapp_signature,
@@ -109,11 +110,22 @@ def whatsapp_webhook_receive():
             try:
                 owner = handle_owner_inbound(item) if staff_companion_enabled() else {"is_owner": False}
                 if owner.get("is_owner"):
-                    if owner.get("menu"):
+                    if owner.get("staff_picker"):
+                        send_whatsapp_list(
+                            owner["phone"], owner["reply"], "Select staff",
+                            owner["staff_picker"],
+                        )
+                    elif owner.get("confirm"):
+                        send_whatsapp_buttons(
+                            owner["phone"], owner["reply"],
+                            [("owner_send_confirm", "Send Now"),
+                             ("owner_send_cancel", "Cancel")],
+                        )
+                    elif owner.get("menu"):
                         send_whatsapp_buttons(
                             owner["phone"], owner["reply"],
                             [("overview", "Overview"),
-                             ("activity", "Staff Activity"),
+                             ("owner_message_staff", "Message Staff"),
                              ("work", "Pending Work")],
                         )
                     else:
