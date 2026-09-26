@@ -83,6 +83,17 @@ class AdvocateDiaries:
             headers=self.headers(),
             timeout=(AD_CONNECT_TIMEOUT, AD_API_READ_TIMEOUT)
         )
+        if response.status_code == 401:
+            # Access tokens can expire while Railway remains running. Re-login
+            # once and repeat this safe read instead of requiring a redeploy.
+            self.access_token = None
+            self.refresh_token = None
+            response = self._read(
+                f"{BASE_URL}/court_cases/daily_cause_list",
+                params={"date": date},
+                headers=self.headers(),
+                timeout=(AD_CONNECT_TIMEOUT, AD_API_READ_TIMEOUT),
+            )
         response.raise_for_status()
 
         try:

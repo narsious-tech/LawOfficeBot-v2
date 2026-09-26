@@ -212,6 +212,7 @@ from commands.mobile_update_queue import (
 from commands.live_hearings import livehearings, live_hearing_callback, hearing_completion_handler
 from services.ad_writeback import retry_pending as retry_ad_writebacks
 from services.ecourts_orchestration_service import retry_pending_ecourts_ad_syncs
+from services.staff_hearing_service import fetch_staff_hearings, hearing_message_chunks
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -852,88 +853,31 @@ async def test_ad(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(str(e))
 async def todayhearings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import time
-    import requests
-    from datetime import datetime
-
     await update.message.reply_text("Fetching hearings...")
 
-    target_date = datetime.now().strftime("%Y-%m-%d")
+    target_date = datetime.now(ZoneInfo("Asia/Kolkata")).date()
 
     if context.args:
         try:
             target_date = datetime.strptime(
                 context.args[0],
                 "%d-%m-%Y"
-            ).strftime("%Y-%m-%d")
-        except:
+            ).date()
+        except ValueError:
             await update.message.reply_text(
                 "Use format: /todayhearings DD-MM-YYYY"
             )  
             return
 
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}"
-    }
-
-    all_cases = []
-
-    for page in range(1, 61):
-        try:
-            r = requests.get(
-                f"{AD_API}/court_cases?page={page}",
-                headers=headers,
-                timeout=(10, 60)
-            )
-
-            if r.status_code == 404:
-                break
-
-            if r.status_code != 200:
-                await update.message.reply_text(
-                    f"Failed at page {page}\nStatus: {r.status_code}"
-                )
-                return
-
-            data = r.json().get("data", [])
-
-            if not data:
-                break
-
-            all_cases.extend(data)
-
-            time.sleep(1)
-
-        except requests.exceptions.Timeout:
-            continue
-
-        except requests.exceptions.RequestException:
-            continue
-
-    matched_cases = [
-        c for c in all_cases
-        if c.get("next_date") == target_date
-    ]
-
-    if not matched_cases:
+    try:
+        result = await asyncio.to_thread(fetch_staff_hearings, target_date)
+        for message in hearing_message_chunks(result):
+            await update.message.reply_text(message)
+    except Exception as exc:
         await update.message.reply_text(
-            f"No hearings on {target_date}"
+            "Unable to fetch Advocate Diaries hearings safely.\n"
+            f"{type(exc).__name__}: {str(exc)[:500]}"
         )
-        return
-
-    msg = "\n\n".join(
-        [
-            f"📌 {c['case_number']}\n"
-            f"⚖ {c['case_title']}\n"
-            f"👨‍⚖ Judge: {c['judge_name']}\n"
-            f"📝 Stage: {c['purpose']}\n"
-           f"━━━━━━━━━━━━━━"
-            for c in matched_cases
-        ]
-    )
-
-    for i in range(0, len(msg), 3500):
-        await update.message.reply_text(msg[i:i+3500])
 
 async def tomorrowcause(update, context):
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%d-%m-%Y")
