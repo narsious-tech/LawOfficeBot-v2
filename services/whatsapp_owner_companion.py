@@ -140,6 +140,8 @@ def classify_owner_command(text: str) -> tuple[str, str]:
         return "OVERVIEW", ""
     if upper in {"ACTIVITY", "STAFF ACTIVITY", "RECENT ACTIVITY"}:
         return "ACTIVITY", ""
+    if upper in {"ATTENDANCE", "TODAY ATTENDANCE", "STAFF ATTENDANCE"}:
+        return "ATTENDANCE", ""
     if upper in {"WORK", "PENDING WORK", "TASKS", "ALL WORK"}:
         return "WORK", "1"
     work_page = re.fullmatch(r"(?:WORK|PENDING WORK)\s+(\d+)", upper)
@@ -167,6 +169,7 @@ def owner_menu() -> str:
         "• @Name <message> — tag and message directly\n"
         "• BROADCAST <message> — all linked staff\n"
         "• ACTIVITY — recent staff actions\n"
+        "• ATTENDANCE — today's staff attendance\n"
         "• WORK — pending work across staff\n"
         "• CASE <number/title> — case search\n\n"
         "Every staff message requires confirmation. No paid template is sent automatically."
@@ -275,6 +278,47 @@ def _owner_activity(cur) -> str:
             stamp = stamp.astimezone(OFFICE_TZ).strftime("%d-%m %I:%M %p")
         lines.append(f"• {row['staff_name']} · {stamp}\n  {str(row.get('summary') or '')[:180]}")
     return "\n\n".join(lines)[:4000]
+
+
+def _owner_attendance(cur) -> str:
+    cur.execute("""
+        SELECT s.staff_name,a.checkin_time,a.checkout_time,a.status,
+               a.checkin_office_name,a.checkout_office_name,a.working_minutes
+        FROM staff_accounts s
+        LEFT JOIN attendance_sessions a
+          ON a.telegram_user_id=s.telegram_user_id
+         AND a.attendance_date=CURRENT_DATE
+        WHERE COALESCE(s.is_active,TRUE)=TRUE
+          AND s.whatsapp_phone IS NOT NULL
+        ORDER BY LOWER(s.staff_name)
+    """)
+    rows = cur.fetchall()
+    if not rows:
+        return "🕒 TODAY'S ATTENDANCE\n\nNo linked active staff were found."
+    lines = ["🕒 TODAY'S STAFF ATTENDANCE", ""]
+    present = 0
+    for row in rows:
+        if not row.get("checkin_time"):
+            lines.append(f"⚪ {row['staff_name']} — Not checked in")
+            continue
+        present += 1
+        if row.get("checkout_time"):
+            minutes = row.get("working_minutes")
+            duration = (
+                f" · {int(minutes) // 60}h {int(minutes) % 60}m"
+                if minutes is not None else ""
+            )
+            lines.append(
+                f"🔴 {row['staff_name']} — Checked out {row['checkout_time']}"
+                f"{duration}"
+            )
+        else:
+            lines.append(
+                f"🟢 {row['staff_name']} — Present since {row['checkin_time']}"
+                f" · {row.get('checkin_office_name') or '-'}"
+            )
+    lines.insert(2, f"Present/attended: {present} of {len(rows)}\n")
+    return "\n".join(lines)[:4000]
 
 
 def _linked_staff(cur) -> list[dict[str, Any]]:
@@ -596,6 +640,8 @@ def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
                 reply = _owner_overview(cur)
             elif action == "ACTIVITY":
                 reply = _owner_activity(cur)
+            elif action == "ATTENDANCE":
+                reply = _owner_attendance(cur)
             elif action == "WORK":
                 requested = int(argument) if str(argument).isdigit() else 1
                 reply, page, total_pages = _owner_work(cur, requested)

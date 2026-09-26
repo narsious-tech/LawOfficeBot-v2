@@ -70,8 +70,12 @@ def classify_staff_command(text: str) -> tuple[str, str]:
         return "CASE", command[5:].strip()
     if upper in {"ATTENDANCE", "ATTENDANCE STATUS", "MY ATTENDANCE"}:
         return "ATTENDANCE_STATUS", ""
-    if upper in {"CHECK IN", "CHECKIN", "CHECK OUT", "CHECKOUT"}:
-        return "ATTENDANCE_ACTION", ""
+    if upper in {"CHECK IN", "CHECKIN"}:
+        return "ATTENDANCE_BEGIN", "CHECKIN"
+    if upper in {"CHECK OUT", "CHECKOUT"}:
+        return "ATTENDANCE_BEGIN", "CHECKOUT"
+    if upper in {"CANCEL", "STOP"}:
+        return "ATTENDANCE_CANCEL", ""
     if upper.startswith("DONE ") or upper.startswith("COMPLETE "):
         task_id = command.split(" ", 1)[1].strip()
         return "TASK_SELECT", task_id
@@ -490,6 +494,8 @@ def menu_rows() -> list[dict[str, str]]:
         {"id": "my_work", "title": "My Work", "description": "View and complete assigned work"},
         {"id": "office_status", "title": "Office Status", "description": "Pending, overdue and attendance"},
         {"id": "attendance_status", "title": "Attendance Status", "description": "Your attendance today"},
+        {"id": "check_in", "title": "Check In", "description": "Share current office location"},
+        {"id": "check_out", "title": "Check Out", "description": "Share current office location"},
         {"id": "case_search", "title": "Case Search", "description": "Find case by number or title"},
         {"id": "help", "title": "Help", "description": "Commands and usage"},
     ]
@@ -503,9 +509,9 @@ def help_text() -> str:
         "Work: MY WORK\n"
         "Complete: choose a task, or send DONE <task number>\n"
         "Search: CASE CS/123/2026 or CASE party name\n"
-        "Attendance: ATTENDANCE STATUS\n\n"
-        "Every completion requires confirmation. Check-in/out and administrative "
-        "approvals remain protected in Telegram."
+        "Attendance: CHECK IN, CHECK OUT or ATTENDANCE STATUS\n\n"
+        "Every completion and attendance punch requires confirmation. Administrative "
+        "corrections and approvals remain protected in Telegram."
     )
 
 
@@ -516,13 +522,20 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
     incoming = str(item.get("text") or "").strip()
     action_id = str(item.get("action_id") or "")
     completed_task = False
+    attendance_success = False
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             staff = _staff_for_phone(cur, phone)
             if not staff:
                 return {"is_staff": False}
-            if action_id.startswith("staff_task_complete:"):
+            if action_id.startswith("staff_attendance_confirm:"):
+                action, argument = "ATTENDANCE_CONFIRM", action_id.partition(":")[2]
+            elif action_id == "staff_attendance_cancel":
+                action, argument = "ATTENDANCE_CANCEL", ""
+            elif str(item.get("type") or "").lower() == "location":
+                action, argument = "ATTENDANCE_LOCATION", ""
+            elif action_id.startswith("staff_task_complete:"):
                 action, argument = "TASK_COMPLETE", action_id.partition(":")[2]
             elif action_id.startswith("staff_task:"):
                 action, argument = "TASK_SELECT", action_id.partition(":")[2]
@@ -534,6 +547,7 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
             replies: list[str]
             task_picker: list[dict[str, str]] = []
             task_confirm: int | None = None
+            attendance_confirm: str | None = None
             if action == "MENU":
                 reply = menu_text(staff["staff_name"])
                 replies = [reply]
@@ -565,11 +579,35 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
             elif action == "CASE":
                 reply = _case_lookup(cur, argument)
                 replies = [reply]
-            elif action == "ATTENDANCE_ACTION":
-                reply = (
-                    "📍 WhatsApp check-in/out will be enabled after location "
-                    "verification. Send ATTENDANCE STATUS to view today."
+            elif action == "ATTENDANCE_BEGIN":
+                from services.whatsapp_attendance_service import begin_attendance
+
+                reply = begin_attendance(phone, staff, argument)
+                replies = [reply]
+            elif action == "ATTENDANCE_LOCATION":
+                from services.whatsapp_attendance_service import review_attendance_location
+
+                result = review_attendance_location(
+                    phone, staff,
+                    latitude=item.get("latitude"),
+                    longitude=item.get("longitude"),
+                    message_timestamp=item.get("message_timestamp"),
+                    forwarded=bool(item.get("forwarded")),
                 )
+                reply = result["reply"]
+                attendance_confirm = result.get("confirm_action")
+                replies = [reply]
+            elif action == "ATTENDANCE_CONFIRM":
+                from services.whatsapp_attendance_service import confirm_attendance
+
+                result = confirm_attendance(phone, staff, argument)
+                reply = result["reply"]
+                attendance_success = bool(result.get("success"))
+                replies = [reply]
+            elif action == "ATTENDANCE_CANCEL":
+                from services.whatsapp_attendance_service import cancel_attendance
+
+                reply = cancel_attendance(phone)
                 replies = [reply]
             elif action == "TASK_SELECT":
                 task = _task_for_staff(cur, staff["staff_name"], argument)
@@ -601,14 +639,18 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
     update_id = int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
     activity_id = record_staff_activity(
         update_id=update_id,
-        event_kind="WHATSAPP_TASK_COMPLETED" if completed_task else "WHATSAPP_MESSAGE",
+        event_kind=(
+            "WHATSAPP_ATTENDANCE" if attendance_success
+            else "WHATSAPP_TASK_COMPLETED" if completed_task
+            else "WHATSAPP_MESSAGE"
+        ),
         user_id=int(staff["telegram_user_id"]),
         staff_name=str(staff["staff_name"]),
         staff_role="staff",
         chat_id=None,
         chat_type="whatsapp_private",
         chat_title="WhatsApp Staff Companion",
-        summary=(reply[:3000] if completed_task else incoming[:3000])
+        summary=(reply[:3000] if (completed_task or attendance_success) else incoming[:3000])
         or f"[{item.get('type') or 'message'}]",
         metadata={
             "phone": phone,
@@ -620,5 +662,6 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
         "is_staff": True, "staff": staff, "reply": reply, "replies": replies,
         "menu": menu, "menu_rows": menu_rows() if menu else [],
         "task_picker": task_picker, "task_confirm": task_confirm,
+        "attendance_confirm": attendance_confirm,
         "activity_id": activity_id, "incoming": incoming, "phone": phone,
     }

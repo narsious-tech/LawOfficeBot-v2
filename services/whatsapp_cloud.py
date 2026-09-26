@@ -493,6 +493,8 @@ def process_webhook(payload: dict[str, Any]) -> list[dict[str, Any]]:
                             or list_reply.get("id")
                             or (message.get("button") or {}).get("payload")
                         )
+                        location = message.get("location") or {}
+                        context = message.get("context") or {}
                         text = (
                             ((message.get("text") or {}).get("body"))
                             or ((message.get("button") or {}).get("text"))
@@ -520,6 +522,13 @@ def process_webhook(payload: dict[str, Any]) -> list[dict[str, Any]]:
                                 "case_id": case_id,
                                 "type": kind,
                                 "action_id": action_id,
+                                "latitude": location.get("latitude"),
+                                "longitude": location.get("longitude"),
+                                "message_timestamp": message.get("timestamp"),
+                                "forwarded": bool(
+                                    context.get("forwarded")
+                                    or context.get("frequently_forwarded")
+                                ),
                             })
         conn.commit()
         return inbound_alerts
