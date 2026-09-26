@@ -4,8 +4,21 @@ import types
 import unittest
 from datetime import date
 
+psycopg2 = sys.modules.get("psycopg2") or types.ModuleType("psycopg2")
+extras = sys.modules.get("psycopg2.extras") or types.ModuleType("psycopg2.extras")
+extras.RealDictCursor = object
+psycopg2.extras = extras
+sys.modules["psycopg2"] = psycopg2
+sys.modules["psycopg2.extras"] = extras
+
+config = sys.modules.get("config") or types.ModuleType("config")
+config.DATABASE_URL = "postgresql://unused"
+sys.modules["config"] = config
+
 from services.whatsapp_dashboard_service import (
     apply_live_status,
+    build_file_selection_picker,
+    _selected_file_message,
     evening_target_plan,
     live_board,
     live_confirmation,
@@ -14,6 +27,33 @@ from services.whatsapp_dashboard_service import (
 
 
 class WhatsAppDashboardTests(unittest.TestCase):
+    def test_staff_message_contains_only_rows_passed_as_selected(self):
+        message = _selected_file_message(date(2026, 9, 28), [{
+            "case_number": "CS/1/2026", "case_title": "Selected Case",
+            "court": "JMIC", "floor": "1", "room": "2", "purpose": "Evidence",
+        }])
+        self.assertIn("CS/1/2026", message)
+        self.assertIn("Total selected files: 1", message)
+        self.assertNotIn("unselected", message.lower())
+
+    def test_physical_file_picker_keeps_whatsapp_list_within_ten_rows(self):
+        rows = [
+            {
+                "id": index,
+                "case_number": f"CS/{index}/2026",
+                "case_title": f"Case {index}",
+                "purpose": "Evidence",
+                "selected": index == 2,
+            }
+            for index in range(1, 16)
+        ]
+        page, pages, visible, picker = build_file_selection_picker(rows, 1)
+        self.assertEqual((page, pages, len(visible)), (1, 3, 7))
+        self.assertLessEqual(len(picker), 10)
+        self.assertEqual(picker[-1]["id"], "owner_files_review")
+        self.assertTrue(any(row["id"] == "owner_files_page:0" for row in picker))
+        self.assertTrue(any(row["id"] == "owner_files_page:2" for row in picker))
+
     def test_saturday_evening_targets_monday_court_day(self):
         plan = evening_target_plan(date(2026, 9, 26))
         self.assertEqual(plan.target_date, date(2026, 9, 28))

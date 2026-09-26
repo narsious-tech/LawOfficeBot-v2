@@ -74,6 +74,12 @@ class Connection:
 
 
 class OwnerTests(unittest.TestCase):
+    def test_physical_file_commands_are_owner_actions(self):
+        self.assertEqual(classify_owner_command("files"), ("FILES", ""))
+        self.assertEqual(classify_owner_command("files review"), ("FILES_REVIEW", ""))
+        self.assertEqual(classify_owner_command("files clear"), ("FILES_CLEAR", ""))
+        self.assertEqual(classify_owner_command("files auto"), ("FILES_AUTO", ""))
+
     def test_owner_number_is_matched_exactly_before_disclosing_data(self):
         cursor = Cursor(authorized=False)
         with patch.dict(os.environ, {
