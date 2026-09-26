@@ -25,10 +25,27 @@ cloud.normalize_phone = lambda value: "".join(c for c in str(value) if c.isdigit
 sys.modules.setdefault("services.whatsapp_cloud", cloud)
 
 from services.whatsapp_staff_companion import (  # noqa: E402
+    _case_lookup,
+    _my_work,
+    _office_status,
     classify_staff_command,
-    menu_rows,
     staff_companion_enabled,
 )
+
+
+class FakeCursor:
+    def __init__(self, fetchone_rows=None, fetchall_rows=None):
+        self.fetchone_rows = list(fetchone_rows or [])
+        self.fetchall_rows = list(fetchall_rows or [])
+
+    def execute(self, _query, _params=None):
+        return None
+
+    def fetchone(self):
+        return self.fetchone_rows.pop(0) if self.fetchone_rows else None
+
+    def fetchall(self):
+        return self.fetchall_rows.pop(0) if self.fetchall_rows else []
 
 
 class WhatsAppStaffCompanionTests(unittest.TestCase):
@@ -41,25 +58,8 @@ class WhatsAppStaffCompanionTests(unittest.TestCase):
             classify_staff_command("CASE CS/3848/2025"),
             ("CASE", "CS/3848/2025"),
         )
-        self.assertEqual(
-            classify_staff_command("Today Hearings"), ("TODAY_HEARINGS", "")
-        )
-        self.assertEqual(
-            classify_staff_command("Tomorrow Hearings"), ("TOMORROW_HEARINGS", "")
-        )
-        self.assertEqual(
-            classify_staff_command("Attendance Status"), ("ATTENDANCE_STATUS", "")
-        )
-        self.assertEqual(
-            classify_staff_command("check in"), ("ATTENDANCE_ACTION", "")
-        )
+        self.assertEqual(classify_staff_command("check in"), ("ATTENDANCE", ""))
         self.assertEqual(classify_staff_command("unknown"), ("MENU", ""))
-
-    def test_staff_menu_fits_whatsapp_list_limit(self):
-        rows = menu_rows()
-        self.assertLessEqual(len(rows), 10)
-        self.assertTrue(any(title == "Today Hearings" for _, title, _ in rows))
-        self.assertTrue(any(title == "My Work" for _, title, _ in rows))
 
     def test_feature_flag_is_off_by_default(self):
         previous = os.environ.pop("WHATSAPP_STAFF_COMPANION_ENABLED", None)
@@ -72,6 +72,52 @@ class WhatsAppStaffCompanionTests(unittest.TestCase):
                 os.environ.pop("WHATSAPP_STAFF_COMPANION_ENABLED", None)
             else:
                 os.environ["WHATSAPP_STAFF_COMPANION_ENABLED"] = previous
+
+    def test_case_lookup_formats_real_dict_rows_as_values(self):
+        cur = FakeCursor(fetchall_rows=[[
+            {
+                "case_number": "CS/3848/2025",
+                "case_title": "Ajay Bajaj vs Bittu Bhatia",
+                "next_hearing": "2026-10-10",
+            }
+        ]])
+        message = _case_lookup(cur, "Ajay Bajaj")
+        self.assertIn("Ajay Bajaj vs Bittu Bhatia", message)
+        self.assertIn("CS/3848/2025", message)
+        self.assertIn("2026-10-10", message)
+        self.assertNotIn("⚖️ case_title", message)
+
+    def test_my_work_formats_real_dict_rows_as_values(self):
+        cur = FakeCursor(
+            fetchone_rows=[{"task_table": "tasks"}],
+            fetchall_rows=[[
+                {
+                    "task_id": 7,
+                    "task_text": "Draft reply",
+                    "task_case_number": "CS/3848/2025",
+                    "deadline": None,
+                    "due_at": "2026-10-01",
+                    "case_title": "Ajay Bajaj vs Bittu Bhatia",
+                }
+            ]],
+        )
+        message = _my_work(cur, "Preet")
+        self.assertIn("#7 · Ajay Bajaj vs Bittu Bhatia", message)
+        self.assertIn("Draft reply", message)
+        self.assertIn("2026-10-01", message)
+
+    def test_office_status_reads_named_counts_and_attendance(self):
+        cur = FakeCursor(fetchone_rows=[
+            {"pending_count": 3, "overdue_count": 1},
+            {"attendance_table": "attendance_sessions"},
+            {"checkin_time": "09:30", "checkout_time": None},
+        ])
+        message = _office_status(
+            cur, {"telegram_user_id": 123, "staff_name": "Preet"}
+        )
+        self.assertIn("Pending work: 3", message)
+        self.assertIn("Overdue: 1", message)
+        self.assertIn("Present / checked in", message)
 
 
 if __name__ == "__main__":
