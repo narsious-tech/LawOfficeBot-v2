@@ -142,6 +142,14 @@ def classify_owner_command(text: str) -> tuple[str, str]:
         return "MORNING_DASHBOARD", ""
     if upper in {"EVENING", "EVENING DASHBOARD", "DAY CLOSING"}:
         return "EVENING_DASHBOARD", ""
+    if upper in {"FILES", "PHYSICAL FILES", "SELECT FILES", "FILE SELECTION"}:
+        return "FILES", ""
+    if upper in {"FILES REVIEW", "REVIEW FILES", "REVIEW SELECTED"}:
+        return "FILES_REVIEW", ""
+    if upper in {"FILES CLEAR", "CLEAR FILES", "CLEAR SELECTION"}:
+        return "FILES_CLEAR", ""
+    if upper in {"FILES AUTO", "AUTO FILES", "AUTO SELECT FILES"}:
+        return "FILES_AUTO", ""
     if upper in {"LIVE", "LIVE HEARINGS", "LIVE CONTROL", "HEARING CONTROL"}:
         return "LIVE", ""
     if upper in {"LIVE REFRESH", "REFRESH LIVE"}:
@@ -175,6 +183,7 @@ def owner_menu() -> str:
         "• OVERVIEW — office totals\n"
         "• MORNING — owner morning dashboard\n"
         "• EVENING — tomorrow's hearing dashboard\n"
+        "• FILES — select physical files case-wise\n"
         "• LIVE — live-hearing status control\n"
         "• MESSAGE — choose one staff member\n"
         "• @Name <message> — tag and message directly\n"
@@ -586,6 +595,65 @@ def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
                     "buttons": result.get("buttons") or [],
                 }
 
+            if action_id == "owner_files_start":
+                from services.whatsapp_dashboard_service import file_selection_board
+
+                result = file_selection_board(phone, 0, initialize=True)
+                return {
+                    "is_owner": True, "phone": phone, "reply": result["reply"],
+                    "list_rows": result.get("rows") or [], "list_button": "Select files",
+                    "list_section": "Physical files",
+                }
+
+            if action_id.startswith("owner_files_page:"):
+                from services.whatsapp_dashboard_service import file_selection_board
+
+                raw_page = action_id.partition(":")[2]
+                result = file_selection_board(phone, int(raw_page) if raw_page.isdigit() else 0)
+                return {
+                    "is_owner": True, "phone": phone, "reply": result["reply"],
+                    "list_rows": result.get("rows") or [], "list_button": "Select files",
+                    "list_section": "Physical files",
+                }
+
+            if action_id.startswith("owner_files_toggle:"):
+                from services.whatsapp_dashboard_service import toggle_file_selection
+
+                parts = action_id.split(":")
+                if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+                    return {"is_owner": True, "phone": phone, "reply": "❌ Invalid file selection."}
+                result = toggle_file_selection(phone, int(parts[1]), int(parts[2]))
+                return {
+                    "is_owner": True, "phone": phone, "reply": result["reply"],
+                    "list_rows": result.get("rows") or [], "list_button": "Select files",
+                    "list_section": "Physical files",
+                }
+
+            if action_id == "owner_files_review":
+                from services.whatsapp_dashboard_service import review_file_selection
+
+                result = review_file_selection(phone)
+                return {
+                    "is_owner": True, "phone": phone, "reply": result["reply"],
+                    "buttons": result.get("buttons") or [],
+                }
+
+            if action_id == "owner_files_clear":
+                from services.whatsapp_dashboard_service import clear_file_selection
+
+                result = clear_file_selection(phone)
+                return {
+                    "is_owner": True, "phone": phone, "reply": result["reply"],
+                    "list_rows": result.get("rows") or [], "list_button": "Select files",
+                    "list_section": "Physical files",
+                }
+
+            if action_id == "owner_files_confirm":
+                from services.whatsapp_dashboard_service import deliver_selected_files
+
+                reply = deliver_selected_files(phone, _admin_id())
+                return {"is_owner": True, "phone": phone, "reply": reply}
+
             if action_id.startswith("owner_work_page:"):
                 requested = action_id.partition(":")[2]
                 page = int(requested) if requested.isdigit() else 1
@@ -710,6 +778,45 @@ def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
                 from services.whatsapp_dashboard_service import owner_evening_dashboard
 
                 reply = owner_evening_dashboard()
+                return {
+                    "is_owner": True, "phone": phone, "reply": reply,
+                    "buttons": [("owner_files_start", "Select Files")],
+                }
+            elif action == "FILES":
+                from services.whatsapp_dashboard_service import file_selection_board
+
+                result = file_selection_board(phone, 0, initialize=True)
+                return {
+                    "is_owner": True, "phone": phone, "reply": result["reply"],
+                    "list_rows": result.get("rows") or [], "list_button": "Select files",
+                    "list_section": "Physical files",
+                }
+            elif action == "FILES_REVIEW":
+                from services.whatsapp_dashboard_service import review_file_selection
+
+                result = review_file_selection(phone)
+                return {
+                    "is_owner": True, "phone": phone, "reply": result["reply"],
+                    "buttons": result.get("buttons") or [],
+                }
+            elif action == "FILES_CLEAR":
+                from services.whatsapp_dashboard_service import clear_file_selection
+
+                result = clear_file_selection(phone)
+                return {
+                    "is_owner": True, "phone": phone, "reply": result["reply"],
+                    "list_rows": result.get("rows") or [], "list_button": "Select files",
+                    "list_section": "Physical files",
+                }
+            elif action == "FILES_AUTO":
+                from services.whatsapp_dashboard_service import auto_select_files
+
+                result = auto_select_files(phone)
+                return {
+                    "is_owner": True, "phone": phone, "reply": result["reply"],
+                    "list_rows": result.get("rows") or [], "list_button": "Select files",
+                    "list_section": "Physical files",
+                }
             elif action in {"LIVE", "LIVE_REFRESH"}:
                 from services.whatsapp_dashboard_service import live_board
 
