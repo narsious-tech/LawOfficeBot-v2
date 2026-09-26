@@ -101,6 +101,14 @@ def link_staff_phone(staff_name: str, phone: str, actor_id: int) -> dict[str, An
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT to_regclass('public.whatsapp_owner_link') AS owner_table")
+            if cur.fetchone().get("owner_table"):
+                cur.execute(
+                    "SELECT 1 FROM whatsapp_owner_link WHERE whatsapp_phone=%s",
+                    (normalized,),
+                )
+                if cur.fetchone():
+                    raise ValueError("This number is linked to the office owner.")
             cur.execute("""
                 SELECT telegram_user_id, staff_name
                 FROM staff_accounts
