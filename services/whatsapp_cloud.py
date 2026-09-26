@@ -25,7 +25,7 @@ def whatsapp_config() -> dict[str, Any]:
         "access_token": os.getenv("WHATSAPP_ACCESS_TOKEN", "").strip(),
         "verify_token": os.getenv("WHATSAPP_VERIFY_TOKEN", "").strip(),
         "app_secret": os.getenv("WHATSAPP_APP_SECRET", "").strip(),
-        "graph_version": os.getenv("WHATSAPP_GRAPH_VERSION", "v23.0").strip(),
+        "graph_version": os.getenv("WHATSAPP_GRAPH_VERSION", "v26.0").strip(),
     }
 
 

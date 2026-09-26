@@ -6,8 +6,6 @@ from typing import Any
 
 
 def fetch_staff_hearings(target_date: date) -> dict[str, Any]:
-    # Use the compact cause-list API first for interactive staff requests.
-    # The authenticated PDF route remains a fallback when the API is degraded.
     from advocate_diaries import AdvocateDiaries
     from commands.dashboard import (
         _normalize_api_groups,
@@ -72,8 +70,6 @@ def hearing_message_chunks(result: dict[str, Any], limit: int = 3900) -> list[st
         chunks.append(current)
         current = header + "\n\n" + block
         if len(current) > limit:
-            # A single unusually large court group is safely clipped rather
-            # than causing Meta or Telegram to reject the whole response.
             current = current[: limit - 40] + "\n\n…additional matters omitted"
     if current:
         chunks.append(current)

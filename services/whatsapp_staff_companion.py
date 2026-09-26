@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -52,16 +52,29 @@ def staff_companion_enabled() -> bool:
 def classify_staff_command(text: str) -> tuple[str, str]:
     command = re.sub(r"\s+", " ", str(text or "")).strip()
     upper = command.upper()
-    if upper in {"MENU", "HI", "HELLO", "START", "HELP", "/START"}:
+    if upper in {"MENU", "HI", "HELLO", "START", "/START"}:
         return "MENU", ""
-    if upper in {"MY WORK", "WORK", "MYWORK", "TASKS"}:
+    if upper in {"HELP", "HOW TO USE"}:
+        return "HELP", ""
+    if upper in {"MY WORK", "WORK", "MYWORK", "TASKS", "MY TASKS"}:
         return "MY_WORK", ""
     if upper in {"OFFICE STATUS", "STATUS", "MY STATUS"}:
         return "OFFICE_STATUS", ""
+    if upper in {"TODAY", "TODAY HEARINGS", "TODAY'S HEARINGS", "HEARINGS TODAY"}:
+        return "TODAY_HEARINGS", ""
+    if upper in {"TOMORROW", "TOMORROW HEARINGS", "TOMORROW'S HEARINGS", "HEARINGS TOMORROW"}:
+        return "TOMORROW_HEARINGS", ""
+    if upper in {"CASE SEARCH", "SEARCH CASE"}:
+        return "CASE_PROMPT", ""
     if upper.startswith("CASE "):
         return "CASE", command[5:].strip()
+    if upper in {"ATTENDANCE", "ATTENDANCE STATUS", "MY ATTENDANCE"}:
+        return "ATTENDANCE_STATUS", ""
     if upper in {"CHECK IN", "CHECKIN", "CHECK OUT", "CHECKOUT"}:
-        return "ATTENDANCE", ""
+        return "ATTENDANCE_ACTION", ""
+    if upper.startswith("DONE ") or upper.startswith("COMPLETE "):
+        task_id = command.split(" ", 1)[1].strip()
+        return "TASK_SELECT", task_id
     return "MENU", ""
 
 
@@ -295,6 +308,142 @@ def _office_status(cur, staff: dict[str, Any]) -> str:
     )
 
 
+def _attendance_status(cur, staff: dict[str, Any]) -> str:
+    cur.execute(
+        "SELECT to_regclass('public.attendance_sessions') AS attendance_table"
+    )
+    table_row = cur.fetchone()
+    if not table_row or not table_row.get("attendance_table"):
+        return "🕒 ATTENDANCE\n\nAttendance records are not available."
+    cur.execute("""
+        SELECT checkin_time AS checkin_time, checkout_time AS checkout_time
+        FROM attendance_sessions
+        WHERE telegram_user_id=%s AND attendance_date=CURRENT_DATE
+        LIMIT 1
+    """, (staff["telegram_user_id"],))
+    row = cur.fetchone()
+    if not row:
+        return "🕒 ATTENDANCE\n\nYou have not checked in today."
+    if row.get("checkout_time"):
+        return (
+            f"🕒 ATTENDANCE\n\n✅ Checked in: {row.get('checkin_time')}\n"
+            f"🏁 Checked out: {row.get('checkout_time')}"
+        )
+    return f"🕒 ATTENDANCE\n\n✅ Present\nChecked in: {row.get('checkin_time')}\nCheckout is pending."
+
+
+def _hearing_replies(days_ahead: int) -> list[str]:
+    from services.staff_hearing_service import (
+        fetch_staff_hearings,
+        hearing_message_chunks,
+    )
+
+    target = (datetime.now(OFFICE_TZ) + timedelta(days=days_ahead)).date()
+    return hearing_message_chunks(fetch_staff_hearings(target))
+
+
+def _task_picker_rows(cur, staff_name: str) -> list[dict[str, str]]:
+    cur.execute("""
+        SELECT id,task,COALESCE(case_number,'') AS case_number,
+               COALESCE(due_at::TEXT,deadline,'') AS due
+        FROM tasks
+        WHERE LOWER(TRIM(COALESCE(assigned_to,'')))=LOWER(TRIM(%s))
+          AND UPPER(COALESCE(status,'PENDING'))<>ALL(%s)
+        ORDER BY due_at NULLS LAST,id
+        LIMIT 10
+    """, (staff_name, list(CLOSED)))
+    rows = []
+    for row in cur.fetchall():
+        task_id = row.get("id")
+        label = str(row.get("task") or "Work")
+        description = " · ".join(
+            value for value in (
+                str(row.get("case_number") or ""), str(row.get("due") or ""),
+            ) if value
+        )
+        rows.append({
+            "id": f"staff_task:{task_id}",
+            "title": f"#{task_id} {label}",
+            "description": description or "Open task details",
+        })
+    return rows
+
+
+def _task_for_staff(cur, staff_name: str, task_id: str) -> dict[str, Any] | None:
+    if not str(task_id).isdigit():
+        return None
+    cur.execute("""
+        SELECT id,task,case_number,notes,source_type,source_work_id,status,
+               COALESCE(due_at::TEXT,deadline,'') AS due
+        FROM tasks
+        WHERE id=%s
+          AND LOWER(TRIM(COALESCE(assigned_to,'')))=LOWER(TRIM(%s))
+        LIMIT 1
+        FOR UPDATE
+    """, (int(task_id), staff_name))
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _task_confirmation(task: dict[str, Any]) -> str:
+    return (
+        "⚠️ CONFIRM WORK COMPLETION\n\n"
+        f"Task #{task['id']}\n"
+        f"📝 {task.get('task') or 'No description'}\n"
+        f"⚖️ {task.get('case_number') or 'General office work'}\n"
+        f"📅 Due: {task.get('due') or 'Not fixed'}\n\n"
+        "Confirm only after the work has actually been completed."
+    )
+
+
+def _complete_staff_task(cur, conn, staff: dict[str, Any], task_id: str) -> str:
+    task = _task_for_staff(cur, staff["staff_name"], task_id)
+    if not task:
+        return "❌ Task not found or it is not assigned to you."
+    if str(task.get("status") or "").upper() in CLOSED:
+        return f"ℹ️ Task #{task['id']} is already completed or closed."
+
+    source_type = str(task.get("source_type") or "manual").lower()
+    source_work_id = task.get("source_work_id")
+    if source_type == "advocate_diaries_work" and source_work_id:
+        try:
+            from advocate_web import AdvocateWeb
+
+            response = AdvocateWeb().complete_work(str(source_work_id))
+            if response.status_code != 200:
+                return (
+                    "❌ Advocate Diaries completion failed.\n"
+                    f"Status: {response.status_code}\n\n"
+                    "The Office OS task was not changed. Please retry or use Telegram."
+                )
+        except Exception as exc:
+            return (
+                "❌ Advocate Diaries completion failed.\n"
+                f"{type(exc).__name__}: {str(exc)[:300]}\n\n"
+                "The Office OS task was not changed. Please retry or use Telegram."
+            )
+
+    cur.execute("""
+        UPDATE tasks
+        SET status='COMPLETED',completed_at=CURRENT_TIMESTAMP
+        WHERE id=%s
+          AND LOWER(TRIM(COALESCE(assigned_to,'')))=LOWER(TRIM(%s))
+          AND UPPER(COALESCE(status,'PENDING'))<>ALL(%s)
+        RETURNING id,task,completed_at
+    """, (int(task["id"]), staff["staff_name"], list(CLOSED)))
+    completed = cur.fetchone()
+    if not completed:
+        conn.rollback()
+        return "❌ The task could not be completed locally. Please refresh My Work."
+    conn.commit()
+    return (
+        f"✅ Task #{completed['id']} marked completed.\n\n"
+        f"📝 {completed.get('task') or task.get('task') or 'Work'}\n"
+        f"👤 {staff['staff_name']}\n"
+        f"🕒 {completed.get('completed_at')}"
+    )
+
+
 def _case_lookup(cur, query: str) -> str:
     needle = query.strip()
     if not needle:
@@ -329,40 +478,119 @@ def _case_lookup(cur, query: str) -> str:
 def menu_text(staff_name: str) -> str:
     return (
         f"🏛 LAW OFFICE OF AJAY CHAWLA\n\nWelcome, {staff_name}.\n"
-        "Choose a button below or send:\n"
-        "• MY WORK\n• OFFICE STATUS\n• CASE <number/title>\n• HELP\n\n"
-        "Telegram remains the secure Command Centre for updates and approvals."
+        "Open the Office Menu below. You can also type CASE followed by a "
+        "case number or title."
+    )
+
+
+def menu_rows() -> list[dict[str, str]]:
+    return [
+        {"id": "today_hearings", "title": "Today Hearings", "description": "Today's cause list"},
+        {"id": "tomorrow_hearings", "title": "Tomorrow Hearings", "description": "Tomorrow's cause list"},
+        {"id": "my_work", "title": "My Work", "description": "View and complete assigned work"},
+        {"id": "office_status", "title": "Office Status", "description": "Pending, overdue and attendance"},
+        {"id": "attendance_status", "title": "Attendance Status", "description": "Your attendance today"},
+        {"id": "case_search", "title": "Case Search", "description": "Find case by number or title"},
+        {"id": "help", "title": "Help", "description": "Commands and usage"},
+    ]
+
+
+def help_text() -> str:
+    return (
+        "ℹ️ WHATSAPP STAFF HELP\n\n"
+        "Use MENU for the full office menu.\n"
+        "Hearings: TODAY HEARINGS or TOMORROW HEARINGS\n"
+        "Work: MY WORK\n"
+        "Complete: choose a task, or send DONE <task number>\n"
+        "Search: CASE CS/123/2026 or CASE party name\n"
+        "Attendance: ATTENDANCE STATUS\n\n"
+        "Every completion requires confirmation. Check-in/out and administrative "
+        "approvals remain protected in Telegram."
     )
 
 
 def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
-    """Route one persisted inbound message; returns is_staff/reply/menu/activity."""
+    """Route one persisted inbound message; returns staff reply controls."""
     ensure_whatsapp_staff_schema()
     phone = normalize_phone(str(item.get("phone") or ""))
     incoming = str(item.get("text") or "").strip()
+    action_id = str(item.get("action_id") or "")
+    completed_task = False
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             staff = _staff_for_phone(cur, phone)
             if not staff:
                 return {"is_staff": False}
-            action, argument = classify_staff_command(incoming)
+            if action_id.startswith("staff_task_complete:"):
+                action, argument = "TASK_COMPLETE", action_id.partition(":")[2]
+            elif action_id.startswith("staff_task:"):
+                action, argument = "TASK_SELECT", action_id.partition(":")[2]
+            elif action_id == "staff_task_cancel":
+                action, argument = "TASK_CANCEL", ""
+            else:
+                action, argument = classify_staff_command(incoming)
             menu = action == "MENU"
+            replies: list[str]
+            task_picker: list[dict[str, str]] = []
+            task_confirm: int | None = None
             if action == "MENU":
                 reply = menu_text(staff["staff_name"])
+                replies = [reply]
+            elif action == "HELP":
+                reply = help_text()
+                replies = [reply]
             elif action == "MY_WORK":
                 reply = _my_work(cur, staff["staff_name"])
+                replies = [reply]
+                task_picker = _task_picker_rows(cur, staff["staff_name"])
             elif action == "OFFICE_STATUS":
                 reply = _office_status(cur, staff)
+                replies = [reply]
+            elif action == "ATTENDANCE_STATUS":
+                reply = _attendance_status(cur, staff)
+                replies = [reply]
+            elif action == "TODAY_HEARINGS":
+                replies = _hearing_replies(0)
+                reply = replies[0]
+            elif action == "TOMORROW_HEARINGS":
+                replies = _hearing_replies(1)
+                reply = replies[0]
+            elif action == "CASE_PROMPT":
+                reply = (
+                    "🔎 Send CASE followed by the case number or party name.\n"
+                    "Example: CASE CS/3848/2025"
+                )
+                replies = [reply]
             elif action == "CASE":
                 reply = _case_lookup(cur, argument)
-            elif action == "ATTENDANCE":
+                replies = [reply]
+            elif action == "ATTENDANCE_ACTION":
                 reply = (
-                    "📍 Attendance requires verified office location. "
-                    "Please use Check In / Check Out in the Telegram bot."
+                    "📍 WhatsApp check-in/out will be enabled after location "
+                    "verification. Send ATTENDANCE STATUS to view today."
                 )
+                replies = [reply]
+            elif action == "TASK_SELECT":
+                task = _task_for_staff(cur, staff["staff_name"], argument)
+                if not task:
+                    reply = "❌ Task not found or it is not assigned to you. Send MY WORK to refresh."
+                elif str(task.get("status") or "").upper() in CLOSED:
+                    reply = f"ℹ️ Task #{task['id']} is already completed or closed."
+                else:
+                    reply = _task_confirmation(task)
+                    task_confirm = int(task["id"])
+                replies = [reply]
+            elif action == "TASK_COMPLETE":
+                reply = _complete_staff_task(cur, conn, staff, argument)
+                replies = [reply]
+                completed_task = reply.startswith("✅")
+            elif action == "TASK_CANCEL":
+                reply = "✅ Completion cancelled. No task was changed."
+                replies = [reply]
             else:
                 reply = menu_text(staff["staff_name"])
+                replies = [reply]
                 menu = True
     finally:
         conn.close()
@@ -373,17 +601,24 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
     update_id = int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
     activity_id = record_staff_activity(
         update_id=update_id,
-        event_kind="WHATSAPP_MESSAGE",
+        event_kind="WHATSAPP_TASK_COMPLETED" if completed_task else "WHATSAPP_MESSAGE",
         user_id=int(staff["telegram_user_id"]),
         staff_name=str(staff["staff_name"]),
         staff_role="staff",
         chat_id=None,
         chat_type="whatsapp_private",
         chat_title="WhatsApp Staff Companion",
-        summary=incoming[:3000] or f"[{item.get('type') or 'message'}]",
-        metadata={"phone": phone, "provider_message_id": item.get("provider_message_id")},
+        summary=(reply[:3000] if completed_task else incoming[:3000])
+        or f"[{item.get('type') or 'message'}]",
+        metadata={
+            "phone": phone,
+            "provider_message_id": item.get("provider_message_id"),
+            "action_id": action_id or None,
+        },
     )
     return {
-        "is_staff": True, "staff": staff, "reply": reply, "menu": menu,
+        "is_staff": True, "staff": staff, "reply": reply, "replies": replies,
+        "menu": menu, "menu_rows": menu_rows() if menu else [],
+        "task_picker": task_picker, "task_confirm": task_confirm,
         "activity_id": activity_id, "incoming": incoming, "phone": phone,
     }
