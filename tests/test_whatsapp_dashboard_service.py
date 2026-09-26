@@ -2,9 +2,11 @@
 import sys
 import types
 import unittest
+from datetime import date
 
 from services.whatsapp_dashboard_service import (
     apply_live_status,
+    evening_target_plan,
     live_board,
     live_confirmation,
     live_detail,
@@ -12,6 +14,14 @@ from services.whatsapp_dashboard_service import (
 
 
 class WhatsAppDashboardTests(unittest.TestCase):
+    def test_saturday_evening_targets_monday_court_day(self):
+        plan = evening_target_plan(date(2026, 9, 26))
+        self.assertEqual(plan.target_date, date(2026, 9, 28))
+
+    def test_sunday_evening_targets_monday_court_day(self):
+        plan = evening_target_plan(date(2026, 9, 27))
+        self.assertEqual(plan.target_date, date(2026, 9, 28))
+
     def setUp(self):
         self.updated = []
         self.hearings = [
