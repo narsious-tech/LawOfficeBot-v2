@@ -26,9 +26,12 @@ sys.modules.setdefault("services.whatsapp_cloud", cloud)
 
 from services.whatsapp_staff_companion import (  # noqa: E402
     _case_lookup,
+    _complete_staff_task,
     _my_work,
     _office_status,
+    _task_picker_rows,
     classify_staff_command,
+    menu_rows,
     staff_companion_enabled,
 )
 
@@ -48,6 +51,18 @@ class FakeCursor:
         return self.fetchall_rows.pop(0) if self.fetchall_rows else []
 
 
+class FakeConnection:
+    def __init__(self):
+        self.committed = False
+        self.rolled_back = False
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
+
+
 class WhatsAppStaffCompanionTests(unittest.TestCase):
     def test_buttons_and_text_map_to_staff_actions(self):
         self.assertEqual(classify_staff_command("My Work"), ("MY_WORK", ""))
@@ -58,7 +73,13 @@ class WhatsAppStaffCompanionTests(unittest.TestCase):
             classify_staff_command("CASE CS/3848/2025"),
             ("CASE", "CS/3848/2025"),
         )
-        self.assertEqual(classify_staff_command("check in"), ("ATTENDANCE", ""))
+        self.assertEqual(
+            classify_staff_command("check in"), ("ATTENDANCE_ACTION", "")
+        )
+        self.assertEqual(
+            classify_staff_command("today hearings"), ("TODAY_HEARINGS", "")
+        )
+        self.assertEqual(classify_staff_command("done 17"), ("TASK_SELECT", "17"))
         self.assertEqual(classify_staff_command("unknown"), ("MENU", ""))
 
     def test_feature_flag_is_off_by_default(self):
@@ -124,6 +145,38 @@ class WhatsAppStaffCompanionTests(unittest.TestCase):
         self.assertIn("Pending work: 3", message)
         self.assertIn("Overdue: 1", message)
         self.assertIn("Present / checked in", message)
+
+    def test_menu_exposes_hearings_work_and_attendance_status(self):
+        titles = [row["title"] for row in menu_rows()]
+        self.assertIn("Today Hearings", titles)
+        self.assertIn("Tomorrow Hearings", titles)
+        self.assertIn("My Work", titles)
+        self.assertIn("Attendance Status", titles)
+
+    def test_task_picker_contains_private_completion_action(self):
+        cur = FakeCursor(fetchall_rows=[[
+            {"id": 17, "task": "Prepare bail reply", "case_number": "CRM-1",
+             "due": "2026-09-27"}
+        ]])
+        rows = _task_picker_rows(cur, "Preet")
+        self.assertEqual(rows[0]["id"], "staff_task:17")
+        self.assertIn("Prepare bail reply", rows[0]["title"])
+
+    def test_manual_task_completion_is_limited_to_assigned_staff(self):
+        cur = FakeCursor(fetchone_rows=[
+            {
+                "id": 17, "task": "Prepare bail reply", "case_number": "CRM-1",
+                "notes": None, "source_type": "manual", "source_work_id": None,
+                "status": "PENDING", "due": "2026-09-27",
+            },
+            {"id": 17, "task": "Prepare bail reply", "completed_at": "now"},
+        ])
+        conn = FakeConnection()
+        reply = _complete_staff_task(
+            cur, conn, {"staff_name": "Preet", "telegram_user_id": 123}, "17"
+        )
+        self.assertTrue(conn.committed)
+        self.assertIn("Task #17 marked completed", reply)
 
 
 if __name__ == "__main__":

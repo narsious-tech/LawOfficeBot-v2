@@ -21,10 +21,10 @@ activity.ensure_staff_activity_schema = lambda: None
 activity.record_staff_activity = lambda **kwargs: 1
 sys.modules.setdefault("services.staff_activity_service", activity)
 
-cloud = types.ModuleType("services.whatsapp_cloud")
+cloud = sys.modules.get("services.whatsapp_cloud") or types.ModuleType("services.whatsapp_cloud")
 cloud.normalize_phone = lambda value: "".join(c for c in str(value) if c.isdigit())
 cloud.send_text_message = lambda phone, text: {"provider_message_id": "wamid.test"}
-sys.modules.setdefault("services.whatsapp_cloud", cloud)
+sys.modules["services.whatsapp_cloud"] = cloud
 
 from services.whatsapp_owner_companion import (  # noqa: E402
     _owner_overview,
