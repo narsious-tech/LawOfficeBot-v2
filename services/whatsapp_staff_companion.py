@@ -56,6 +56,10 @@ def classify_staff_command(text: str) -> tuple[str, str]:
         return "MENU", ""
     if upper in {"HELP", "HOW TO USE"}:
         return "HELP", ""
+    if upper in {"MORNING", "MORNING DASHBOARD", "MORNING BRIEF"}:
+        return "MORNING_DASHBOARD", ""
+    if upper in {"EVENING", "EVENING DASHBOARD", "DAY CLOSING", "DAY CLOSING DASHBOARD"}:
+        return "EVENING_DASHBOARD", ""
     if upper in {"MY WORK", "WORK", "MYWORK", "TASKS", "MY TASKS"}:
         return "MY_WORK", ""
     if upper in {"OFFICE STATUS", "STATUS", "MY STATUS"}:
@@ -489,6 +493,8 @@ def menu_text(staff_name: str) -> str:
 
 def menu_rows() -> list[dict[str, str]]:
     return [
+        {"id": "morning_dashboard", "title": "Morning Dashboard", "description": "Priorities and personal work brief"},
+        {"id": "evening_dashboard", "title": "Evening Dashboard", "description": "Private day-closing board"},
         {"id": "today_hearings", "title": "Today Hearings", "description": "Today's cause list"},
         {"id": "tomorrow_hearings", "title": "Tomorrow Hearings", "description": "Tomorrow's cause list"},
         {"id": "my_work", "title": "My Work", "description": "View and complete assigned work"},
@@ -497,7 +503,6 @@ def menu_rows() -> list[dict[str, str]]:
         {"id": "check_in", "title": "Check In", "description": "Share current office location"},
         {"id": "check_out", "title": "Check Out", "description": "Share current office location"},
         {"id": "case_search", "title": "Case Search", "description": "Find case by number or title"},
-        {"id": "help", "title": "Help", "description": "Commands and usage"},
     ]
 
 
@@ -505,6 +510,7 @@ def help_text() -> str:
     return (
         "ℹ️ WHATSAPP STAFF HELP\n\n"
         "Use MENU for the full office menu.\n"
+        "Dashboards: MORNING DASHBOARD or EVENING DASHBOARD\n"
         "Hearings: TODAY HEARINGS or TOMORROW HEARINGS\n"
         "Work: MY WORK\n"
         "Complete: choose a task, or send DONE <task number>\n"
@@ -541,6 +547,10 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
                 action, argument = "TASK_SELECT", action_id.partition(":")[2]
             elif action_id == "staff_task_cancel":
                 action, argument = "TASK_CANCEL", ""
+            elif action_id == "morning_dashboard":
+                action, argument = "MORNING_DASHBOARD", ""
+            elif action_id == "evening_dashboard":
+                action, argument = "EVENING_DASHBOARD", ""
             else:
                 action, argument = classify_staff_command(incoming)
             menu = action == "MENU"
@@ -553,6 +563,16 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
                 replies = [reply]
             elif action == "HELP":
                 reply = help_text()
+                replies = [reply]
+            elif action == "MORNING_DASHBOARD":
+                from services.whatsapp_dashboard_service import staff_morning_dashboard
+
+                reply = staff_morning_dashboard(staff)
+                replies = [reply]
+            elif action == "EVENING_DASHBOARD":
+                from services.whatsapp_dashboard_service import staff_evening_dashboard
+
+                reply = staff_evening_dashboard(staff)
                 replies = [reply]
             elif action == "MY_WORK":
                 reply = _my_work(cur, staff["staff_name"])

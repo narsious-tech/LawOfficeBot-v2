@@ -138,6 +138,14 @@ def classify_owner_command(text: str) -> tuple[str, str]:
         return "MENU", ""
     if upper in {"OVERVIEW", "OFFICE STATUS", "STATUS"}:
         return "OVERVIEW", ""
+    if upper in {"MORNING", "MORNING DASHBOARD", "MORNING BRIEF"}:
+        return "MORNING_DASHBOARD", ""
+    if upper in {"EVENING", "EVENING DASHBOARD", "DAY CLOSING"}:
+        return "EVENING_DASHBOARD", ""
+    if upper in {"LIVE", "LIVE HEARINGS", "LIVE CONTROL", "HEARING CONTROL"}:
+        return "LIVE", ""
+    if upper in {"LIVE REFRESH", "REFRESH LIVE"}:
+        return "LIVE_REFRESH", ""
     if upper in {"ACTIVITY", "STAFF ACTIVITY", "RECENT ACTIVITY"}:
         return "ACTIVITY", ""
     if upper in {"ATTENDANCE", "TODAY ATTENDANCE", "STAFF ATTENDANCE"}:
@@ -165,6 +173,9 @@ def owner_menu() -> str:
         "🏛 LAW OFFICE — OWNER DESK\n\n"
         "Welcome, Ajay. Choose a button or send:\n"
         "• OVERVIEW — office totals\n"
+        "• MORNING — owner morning dashboard\n"
+        "• EVENING — tomorrow's hearing dashboard\n"
+        "• LIVE — live-hearing status control\n"
         "• MESSAGE — choose one staff member\n"
         "• @Name <message> — tag and message directly\n"
         "• BROADCAST <message> — all linked staff\n"
@@ -522,6 +533,59 @@ def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
                 conn.commit()
                 return {"is_owner": True, "phone": phone, "reply": reply}
 
+            if action_id == "owner_menu":
+                _clear_compose(cur, phone)
+                conn.commit()
+                return {"is_owner": True, "phone": phone, "reply": owner_menu(), "menu": True}
+
+            if action_id.startswith("owner_live_page:"):
+                from services.whatsapp_dashboard_service import live_board
+
+                raw_page = action_id.partition(":")[2]
+                board = live_board(int(raw_page) if raw_page.isdigit() else 0)
+                return {
+                    "is_owner": True, "phone": phone, "reply": board["reply"],
+                    "list_rows": board.get("rows") or [], "list_button": "Choose hearing",
+                    "list_section": "Today's hearings",
+                }
+
+            if action_id.startswith("owner_live_open:"):
+                from services.whatsapp_dashboard_service import live_detail
+
+                parts = action_id.split(":")
+                if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+                    return {"is_owner": True, "phone": phone, "reply": "❌ Invalid live-hearing selection."}
+                detail = live_detail(int(parts[1]), int(parts[2]))
+                return {
+                    "is_owner": True, "phone": phone, "reply": detail["reply"],
+                    "list_rows": detail.get("rows") or [], "list_button": "Change status",
+                    "list_section": "Owner live controls",
+                }
+
+            if action_id.startswith("owner_live_choose:"):
+                from services.whatsapp_dashboard_service import live_confirmation
+
+                parts = action_id.split(":")
+                if len(parts) != 4 or not parts[1].isdigit() or not parts[3].isdigit():
+                    return {"is_owner": True, "phone": phone, "reply": "❌ Invalid live-hearing status."}
+                result = live_confirmation(int(parts[1]), parts[2], int(parts[3]))
+                return {
+                    "is_owner": True, "phone": phone, "reply": result["reply"],
+                    "buttons": result.get("buttons") or [],
+                }
+
+            if action_id.startswith("owner_live_confirm:"):
+                from services.whatsapp_dashboard_service import apply_live_status
+
+                parts = action_id.split(":")
+                if len(parts) != 4 or not parts[1].isdigit() or not parts[3].isdigit():
+                    return {"is_owner": True, "phone": phone, "reply": "❌ Invalid live-hearing confirmation."}
+                result = apply_live_status(int(parts[1]), parts[2], _admin_id(), int(parts[3]))
+                return {
+                    "is_owner": True, "phone": phone, "reply": result["reply"],
+                    "buttons": result.get("buttons") or [],
+                }
+
             if action_id.startswith("owner_work_page:"):
                 requested = action_id.partition(":")[2]
                 page = int(requested) if requested.isdigit() else 1
@@ -638,6 +702,23 @@ def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
 
             if action == "OVERVIEW":
                 reply = _owner_overview(cur)
+            elif action == "MORNING_DASHBOARD":
+                from services.whatsapp_dashboard_service import owner_morning_dashboard
+
+                reply = owner_morning_dashboard()
+            elif action == "EVENING_DASHBOARD":
+                from services.whatsapp_dashboard_service import owner_evening_dashboard
+
+                reply = owner_evening_dashboard()
+            elif action in {"LIVE", "LIVE_REFRESH"}:
+                from services.whatsapp_dashboard_service import live_board
+
+                board = live_board(0, refresh=action == "LIVE_REFRESH")
+                return {
+                    "is_owner": True, "phone": phone, "reply": board["reply"],
+                    "list_rows": board.get("rows") or [], "list_button": "Choose hearing",
+                    "list_section": "Today's hearings",
+                }
             elif action == "ACTIVITY":
                 reply = _owner_activity(cur)
             elif action == "ATTENDANCE":
