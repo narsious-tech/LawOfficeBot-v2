@@ -141,7 +141,10 @@ def classify_owner_command(text: str) -> tuple[str, str]:
     if upper in {"ACTIVITY", "STAFF ACTIVITY", "RECENT ACTIVITY"}:
         return "ACTIVITY", ""
     if upper in {"WORK", "PENDING WORK", "TASKS", "ALL WORK"}:
-        return "WORK", ""
+        return "WORK", "1"
+    work_page = re.fullmatch(r"(?:WORK|PENDING WORK)\s+(\d+)", upper)
+    if work_page:
+        return "WORK", work_page.group(1)
     if upper in {"MESSAGE", "MESSAGE STAFF", "SEND", "STAFF", "TEAM"}:
         return "MESSAGE", ""
     if upper == "BROADCAST":
@@ -218,18 +221,23 @@ def _owner_overview(cur) -> str:
     return "\n".join(lines)[:4000]
 
 
-def _owner_work(cur) -> str:
+def _owner_work(cur, page: int = 1, page_size: int = 10) -> tuple[str, int, int]:
     rows = _office_work_rows(cur)
     if not rows:
-        return "✅ OFFICE WORK\n\nNo pending work."
+        return "✅ OFFICE WORK\n\nNo pending work.", 1, 1
     today = datetime.now(OFFICE_TZ).date()
 
     def priority(row):
         due = _deadline_date(row.get("due_at") or row.get("deadline"))
         return (0 if due and due < today else 1, due or date.max, row.get("task_id") or 0)
 
-    lines = ["📋 PENDING OFFICE WORK", ""]
-    for row in sorted(rows, key=priority)[:10]:
+    ordered = sorted(rows, key=priority)
+    total_pages = max(1, (len(ordered) + page_size - 1) // page_size)
+    page = max(1, min(int(page), total_pages))
+    start = (page - 1) * page_size
+    selected = ordered[start:start + page_size]
+    lines = ["📋 PENDING OFFICE WORK", f"Page {page} of {total_pages}", ""]
+    for row in selected:
         lines.extend([
             f"#{row['task_id']} · {row.get('staff_name') or 'Unassigned'}",
             f"📝 {row.get('task_text') or 'No description'}",
@@ -244,8 +252,11 @@ def _owner_work(cur) -> str:
         lines.extend([
             f"📅 Due: {row.get('due_at') or row.get('deadline') or 'Not fixed'}", "",
         ])
-    lines.append(f"Showing {min(len(rows), 10)} of {len(rows)}. Use Telegram for updates.")
-    return "\n".join(lines)[:4000]
+    lines.append(
+        f"Showing {start + 1}-{start + len(selected)} of {len(ordered)}. "
+        f"Send WORK <page>, for example WORK {min(page + 1, total_pages)}."
+    )
+    return "\n".join(lines)[:4000], page, total_pages
 
 
 def _owner_activity(cur) -> str:
@@ -467,6 +478,21 @@ def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
                 conn.commit()
                 return {"is_owner": True, "phone": phone, "reply": reply}
 
+            if action_id.startswith("owner_work_page:"):
+                requested = action_id.partition(":")[2]
+                page = int(requested) if requested.isdigit() else 1
+                reply, page, total_pages = _owner_work(cur, page)
+                nav = []
+                if page > 1:
+                    nav.append((f"owner_work_page:{page - 1}", "Previous"))
+                nav.append(("owner_menu", "Menu"))
+                if page < total_pages:
+                    nav.append((f"owner_work_page:{page + 1}", "Next"))
+                return {
+                    "is_owner": True, "phone": phone, "reply": reply,
+                    "work_nav": nav,
+                }
+
             if action_id.startswith("owner_staff:"):
                 staff_id = action_id.partition(":")[2]
                 cur.execute("""
@@ -571,7 +597,18 @@ def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
             elif action == "ACTIVITY":
                 reply = _owner_activity(cur)
             elif action == "WORK":
-                reply = _owner_work(cur)
+                requested = int(argument) if str(argument).isdigit() else 1
+                reply, page, total_pages = _owner_work(cur, requested)
+                nav = []
+                if page > 1:
+                    nav.append((f"owner_work_page:{page - 1}", "Previous"))
+                nav.append(("owner_menu", "Menu"))
+                if page < total_pages:
+                    nav.append((f"owner_work_page:{page + 1}", "Next"))
+                return {
+                    "is_owner": True, "phone": phone, "reply": reply,
+                    "work_nav": nav,
+                }
             elif action == "CASE":
                 reply = _case_lookup(cur, argument)
             else:
