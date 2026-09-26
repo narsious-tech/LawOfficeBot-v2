@@ -165,6 +165,13 @@ def _process_whatsapp_inbound(item):
                     result["phone"], result["reply"], "Choose work",
                     result["task_picker"],
                 )
+            elif result.get("attendance_confirm"):
+                action = result["attendance_confirm"]
+                send_whatsapp_buttons(
+                    result["phone"], result["reply"],
+                    [(f"staff_attendance_confirm:{action}", "Confirm"),
+                     ("staff_attendance_cancel", "Cancel")],
+                )
             elif result.get("task_confirm"):
                 task_id = result["task_confirm"]
                 send_whatsapp_buttons(
