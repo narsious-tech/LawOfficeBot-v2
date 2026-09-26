@@ -172,12 +172,23 @@ def owner_menu() -> str:
 
 def _office_work_rows(cur) -> list[dict[str, Any]]:
     cur.execute("""
-        SELECT id AS task_id, task AS task_text, assigned_to AS staff_name,
-               case_number AS case_number, deadline AS deadline,
-               due_at AS due_at
-        FROM tasks
-        WHERE UPPER(COALESCE(status,'PENDING'))<>ALL(%s)
-        ORDER BY id DESC
+        SELECT t.id AS task_id, t.task AS task_text,
+               t.assigned_to AS staff_name, t.case_number AS case_number,
+               t.deadline AS deadline, t.due_at AS due_at,
+               COALESCE(linked_case.case_title,'') AS case_title
+        FROM tasks t
+        LEFT JOIN LATERAL (
+            SELECT c.case_title
+            FROM cases c
+            WHERE LOWER(TRIM(COALESCE(c.case_number,'')))=
+                  LOWER(TRIM(COALESCE(t.case_number,'')))
+               OR LOWER(TRIM(COALESCE(c.case_id,'')))=
+                  LOWER(TRIM(COALESCE(t.case_number,'')))
+            ORDER BY c.id DESC
+            LIMIT 1
+        ) linked_case ON NULLIF(TRIM(COALESCE(t.case_number,'')),'') IS NOT NULL
+        WHERE UPPER(COALESCE(t.status,'PENDING'))<>ALL(%s)
+        ORDER BY t.id DESC
     """, (list(CLOSED),))
     return list(cur.fetchall())
 
@@ -222,7 +233,15 @@ def _owner_work(cur) -> str:
         lines.extend([
             f"#{row['task_id']} · {row.get('staff_name') or 'Unassigned'}",
             f"📝 {row.get('task_text') or 'No description'}",
-            f"⚖️ {row.get('case_number') or 'General office work'}",
+        ])
+        if row.get("case_number"):
+            lines.extend([
+                f"⚖️ {row.get('case_title') or 'Case title not recorded'}",
+                f"🔢 {row.get('case_number')}",
+            ])
+        else:
+            lines.append("⚖️ General office work")
+        lines.extend([
             f"📅 Due: {row.get('due_at') or row.get('deadline') or 'Not fixed'}", "",
         ])
     lines.append(f"Showing {min(len(rows), 10)} of {len(rows)}. Use Telegram for updates.")
