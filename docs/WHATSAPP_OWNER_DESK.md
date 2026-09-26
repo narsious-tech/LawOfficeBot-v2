@@ -21,7 +21,16 @@ Use Ajay's personal WhatsApp number in the first command. The office Cloud API s
 - `ACTIVITY`: six recent staff actions from the office activity feed.
 - `WORK`: first ten pending tasks across the office, with overdue tasks first.
 - `CASE <number or title>`: read-only case search.
+- `MESSAGE`: open the linked-staff picker, select one person, type the message, and confirm.
+- `@Name <message>`: tag a linked staff member and prepare a direct private message.
+- `BROADCAST <message>`: prepare the same private message for all linked staff.
 - `HI` or `MENU`: return to the owner menu.
+
+Every direct message and broadcast requires **Send Now** confirmation. Delivery is
+recorded in `whatsapp_staff_direct_messages`. Free-form delivery is attempted only
+when that staff member has messaged the bot within the last 24 hours. If the window
+is closed, the recipient is skipped and Ajay is told to ask them to send `HI`.
+The feature never falls back to a paid template automatically.
 
 Only Telegram's configured `ADMIN_USER_ID` can link, replace, or unlink the owner phone. The bot compares the normalized WhatsApp sender to that link on every message. It does not grant owner access to other staff numbers. The owner menu does not change tasks, cases, attendance or approvals. Staff activity alerts continue in the owner's private Telegram chat; `ACTIVITY` provides an on-demand WhatsApp view without outbound template messages.
 
