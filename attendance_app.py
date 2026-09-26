@@ -46,6 +46,31 @@ def attendance_root():
     return redirect("/attendance-app", code=302)
 
 
+def _legal_page_context():
+    return {
+        "office_name": os.getenv("OFFICE_NAME", "Law Office of Ajay Chawla"),
+        "contact_email": os.getenv(
+            "PRIVACY_CONTACT_EMAIL",
+            os.getenv("OFFICE_EMAIL", "ajay_chawla@ymail.com"),
+        ),
+    }
+
+
+@attendance_app.get("/privacy")
+def privacy_policy():
+    return render_template("privacy.html", **_legal_page_context())
+
+
+@attendance_app.get("/terms")
+def terms_of_service():
+    return render_template("terms.html", **_legal_page_context())
+
+
+@attendance_app.get("/data-deletion")
+def data_deletion_instructions():
+    return render_template("data_deletion.html", **_legal_page_context())
+
+
 def _notify_whatsapp_inbound(item):
     destination = OFFICE_GROUP_CHAT_ID or ADMIN_CHAT_ID
     if not BOT_TOKEN or not destination:
