@@ -25,7 +25,7 @@ def whatsapp_config() -> dict[str, Any]:
         "access_token": os.getenv("WHATSAPP_ACCESS_TOKEN", "").strip(),
         "verify_token": os.getenv("WHATSAPP_VERIFY_TOKEN", "").strip(),
         "app_secret": os.getenv("WHATSAPP_APP_SECRET", "").strip(),
-        "graph_version": os.getenv("WHATSAPP_GRAPH_VERSION", "v26.0").strip(),
+        "graph_version": os.getenv("WHATSAPP_GRAPH_VERSION", "v23.0").strip(),
     }
 
 
@@ -199,23 +199,26 @@ def send_button_message(
 def send_list_message(
     phone: str,
     body: str,
-    button_text: str,
-    rows: list[tuple[str, str, str]],
+    button_title: str,
+    rows: list[dict[str, str]],
+    *,
+    section_title: str = "Choose staff member",
 ) -> dict[str, Any]:
-    """Send a compact staff menu with up to ten list rows."""
+    """Send a single-section interactive list with up to ten rows."""
     cfg = whatsapp_config()
     if not transport_ready():
         raise RuntimeError("WhatsApp Cloud API configuration is incomplete.")
     choices = [
         {
-            "id": key[:200],
-            "title": title[:24],
-            "description": description[:72],
+            "id": str(row.get("id") or "")[:200],
+            "title": str(row.get("title") or "")[:24],
+            "description": str(row.get("description") or "")[:72],
         }
-        for key, title, description in rows[:10]
+        for row in rows[:10]
+        if row.get("id") and row.get("title")
     ]
     if not choices:
-        raise ValueError("At least one WhatsApp menu row is required.")
+        raise ValueError("At least one staff row is required.")
     response = requests.post(
         _graph_url(),
         headers={
@@ -230,8 +233,11 @@ def send_list_message(
                 "type": "list",
                 "body": {"text": body[:1024]},
                 "action": {
-                    "button": button_text[:20],
-                    "sections": [{"title": "Office Menu", "rows": choices}],
+                    "button": button_title[:20],
+                    "sections": [{
+                        "title": section_title[:24],
+                        "rows": choices,
+                    }],
                 },
             },
         },
@@ -240,10 +246,10 @@ def send_list_message(
     payload = response.json() if response.content else {}
     if response.status_code >= 400:
         message = ((payload.get("error") or {}).get("message")) or f"HTTP {response.status_code}"
-        raise RuntimeError(f"Meta rejected the list message: {message}")
+        raise RuntimeError(f"Meta rejected the staff list: {message}")
     provider_id = ((payload.get("messages") or [{}])[0]).get("id")
     if not provider_id:
-        raise RuntimeError("Meta accepted the menu without returning a message ID.")
+        raise RuntimeError("Meta accepted the staff list without returning a message ID.")
     return {"provider_message_id": provider_id, "response": payload}
 
 
@@ -479,11 +485,19 @@ def process_webhook(payload: dict[str, Any]) -> list[dict[str, Any]]:
                         provider_id = message.get("id")
                         phone = normalize_phone(message.get("from") or "")
                         kind = message.get("type") or "unknown"
+                        interactive = message.get("interactive") or {}
+                        button_reply = interactive.get("button_reply") or {}
+                        list_reply = interactive.get("list_reply") or {}
+                        action_id = (
+                            button_reply.get("id")
+                            or list_reply.get("id")
+                            or (message.get("button") or {}).get("payload")
+                        )
                         text = (
                             ((message.get("text") or {}).get("body"))
                             or ((message.get("button") or {}).get("text"))
-                            or ((message.get("interactive") or {}).get("button_reply") or {}).get("title")
-                            or ((message.get("interactive") or {}).get("list_reply") or {}).get("title")
+                            or button_reply.get("title")
+                            or list_reply.get("title")
                             or f"[{kind} message]"
                         )
                         case_id = _find_case_for_phone(cur, phone)
@@ -505,6 +519,7 @@ def process_webhook(payload: dict[str, Any]) -> list[dict[str, Any]]:
                                 "text": text,
                                 "case_id": case_id,
                                 "type": kind,
+                                "action_id": action_id,
                             })
         conn.commit()
         return inbound_alerts

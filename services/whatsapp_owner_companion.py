@@ -1,4 +1,4 @@
-"""Private, read-only WhatsApp view for the office owner."""
+"""Private WhatsApp Owner Desk with controlled staff messaging."""
 from __future__ import annotations
 
 import os
@@ -10,7 +10,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from config import DATABASE_URL
-from services.whatsapp_cloud import normalize_phone
+from services.whatsapp_cloud import normalize_phone, send_text_message
 from services.whatsapp_staff_companion import (
     CLOSED, OFFICE_TZ, _case_lookup, _deadline_date, staff_companion_enabled,
 )
@@ -31,6 +31,34 @@ def ensure_owner_schema() -> None:
                     whatsapp_phone TEXT UNIQUE NOT NULL,
                     owner_telegram_id BIGINT NOT NULL,
                     linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS whatsapp_owner_compose (
+                    owner_phone TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL CHECK (scope IN ('DIRECT','BROADCAST')),
+                    recipient_telegram_id BIGINT,
+                    recipient_name TEXT,
+                    recipient_phone TEXT,
+                    message_text TEXT,
+                    stage TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS whatsapp_staff_direct_messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    owner_phone TEXT NOT NULL,
+                    recipient_telegram_id BIGINT,
+                    recipient_name TEXT NOT NULL,
+                    recipient_phone TEXT NOT NULL,
+                    message_text TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    delivery_status TEXT NOT NULL,
+                    provider_message_id TEXT,
+                    provider_error TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    sent_at TIMESTAMPTZ
                 )
             """)
         conn.commit()
@@ -96,6 +124,7 @@ def unlink_owner_phone(admin_id: int) -> None:
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
     try:
         with conn.cursor() as cur:
+            cur.execute("DELETE FROM whatsapp_owner_compose")
             cur.execute("DELETE FROM whatsapp_owner_link WHERE id=1")
         conn.commit()
     finally:
@@ -113,9 +142,17 @@ def classify_owner_command(text: str) -> tuple[str, str]:
         return "ACTIVITY", ""
     if upper in {"WORK", "PENDING WORK", "TASKS", "ALL WORK"}:
         return "WORK", ""
+    if upper in {"MESSAGE", "MESSAGE STAFF", "SEND", "STAFF", "TEAM"}:
+        return "MESSAGE", ""
+    if upper == "BROADCAST":
+        return "BROADCAST", ""
+    if upper.startswith("BROADCAST "):
+        return "BROADCAST", command[10:].strip()
+    if upper in {"CANCEL", "STOP"}:
+        return "CANCEL", ""
     if upper.startswith("CASE "):
         return "CASE", command[5:].strip()
-    return "MENU", ""
+    return "UNKNOWN", command
 
 
 def owner_menu() -> str:
@@ -123,10 +160,13 @@ def owner_menu() -> str:
         "🏛 LAW OFFICE — OWNER DESK\n\n"
         "Welcome, Ajay. Choose a button or send:\n"
         "• OVERVIEW — office totals\n"
+        "• MESSAGE — choose one staff member\n"
+        "• @Name <message> — tag and message directly\n"
+        "• BROADCAST <message> — all linked staff\n"
         "• ACTIVITY — recent staff actions\n"
         "• WORK — pending work across staff\n"
         "• CASE <number/title> — case search\n\n"
-        "Administrative changes remain in your private Telegram bot."
+        "Every staff message requires confirmation. No paid template is sent automatically."
     )
 
 
@@ -172,9 +212,11 @@ def _owner_work(cur) -> str:
     if not rows:
         return "✅ OFFICE WORK\n\nNo pending work."
     today = datetime.now(OFFICE_TZ).date()
+
     def priority(row):
         due = _deadline_date(row.get("due_at") or row.get("deadline"))
         return (0 if due and due < today else 1, due or date.max, row.get("task_id") or 0)
+
     lines = ["📋 PENDING OFFICE WORK", ""]
     for row in sorted(rows, key=priority)[:10]:
         lines.extend([
@@ -205,11 +247,179 @@ def _owner_activity(cur) -> str:
     return "\n\n".join(lines)[:4000]
 
 
+def _linked_staff(cur) -> list[dict[str, Any]]:
+    cur.execute("""
+        SELECT telegram_user_id,staff_name,whatsapp_phone
+        FROM staff_accounts
+        WHERE whatsapp_phone IS NOT NULL AND COALESCE(is_active,TRUE)=TRUE
+        ORDER BY LOWER(staff_name)
+    """)
+    return [dict(row) for row in cur.fetchall()]
+
+
+def match_tagged_staff(text: str, rows: list[dict[str, Any]]) -> tuple[dict[str, Any], str] | None:
+    """Resolve @Exact Name using the longest linked name first."""
+    incoming = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not incoming.startswith("@"):
+        return None
+    body = incoming[1:]
+    for row in sorted(rows, key=lambda item: len(str(item.get("staff_name") or "")), reverse=True):
+        name = str(row.get("staff_name") or "").strip()
+        if name and body[:len(name)].casefold() == name.casefold():
+            remainder = body[len(name):]
+            if not remainder or remainder[0] in " :,-":
+                message = remainder.lstrip(" :,-").strip()
+                return row, message
+    return None
+
+
+def _save_compose(
+    cur, owner_phone: str, scope: str, stage: str, *,
+    recipient: dict[str, Any] | None = None, message: str | None = None,
+) -> None:
+    cur.execute("""
+        INSERT INTO whatsapp_owner_compose(
+            owner_phone,scope,recipient_telegram_id,recipient_name,
+            recipient_phone,message_text,stage,updated_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,NOW())
+        ON CONFLICT(owner_phone) DO UPDATE SET
+            scope=EXCLUDED.scope,
+            recipient_telegram_id=EXCLUDED.recipient_telegram_id,
+            recipient_name=EXCLUDED.recipient_name,
+            recipient_phone=EXCLUDED.recipient_phone,
+            message_text=EXCLUDED.message_text,
+            stage=EXCLUDED.stage,
+            updated_at=NOW()
+    """, (
+        owner_phone, scope,
+        recipient.get("telegram_user_id") if recipient else None,
+        recipient.get("staff_name") if recipient else None,
+        recipient.get("whatsapp_phone") if recipient else None,
+        message, stage,
+    ))
+
+
+def _pending_compose(cur, owner_phone: str) -> dict[str, Any] | None:
+    cur.execute("""
+        SELECT * FROM whatsapp_owner_compose
+        WHERE owner_phone=%s AND updated_at >= NOW() - INTERVAL '30 minutes'
+    """, (owner_phone,))
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _clear_compose(cur, owner_phone: str) -> None:
+    cur.execute("DELETE FROM whatsapp_owner_compose WHERE owner_phone=%s", (owner_phone,))
+
+
+def _confirmation(scope: str, message: str, recipient_name: str | None = None) -> str:
+    target = "all linked staff" if scope == "BROADCAST" else recipient_name or "staff member"
+    return (
+        f"⚠️ CONFIRM MESSAGE\n\nTo: {target}\n\n"
+        f"{message[:3000]}\n\n"
+        "Select Send Now or Cancel."
+    )
+
+
+def _staff_picker(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {
+            "id": f"owner_staff:{row['telegram_user_id']}",
+            "title": str(row["staff_name"]),
+            "description": f"Send privately to +{row['whatsapp_phone']}",
+        }
+        for row in rows[:10]
+    ]
+
+
+def _freeform_window_open(cur, phone: str) -> bool:
+    cur.execute("""
+        SELECT 1 FROM whatsapp_inbound_messages
+        WHERE sender_phone=%s AND received_at >= NOW() - INTERVAL '24 hours'
+        LIMIT 1
+    """, (normalize_phone(phone),))
+    return bool(cur.fetchone())
+
+
+def _log_delivery(
+    cur, owner_phone: str, recipient: dict[str, Any], message: str,
+    scope: str, status: str, provider_id: str | None = None,
+    error: str | None = None,
+) -> None:
+    cur.execute("""
+        INSERT INTO whatsapp_staff_direct_messages(
+            owner_phone,recipient_telegram_id,recipient_name,recipient_phone,
+            message_text,scope,delivery_status,provider_message_id,
+            provider_error,sent_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                  CASE WHEN %s='SENT' THEN NOW() ELSE NULL END)
+    """, (
+        owner_phone, recipient.get("telegram_user_id"), recipient["staff_name"],
+        recipient["whatsapp_phone"], message, scope, status, provider_id,
+        (error or "")[:1000] or None, status,
+    ))
+
+
+def _deliver(cur, owner_phone: str, pending: dict[str, Any]) -> str:
+    scope = str(pending["scope"])
+    message = str(pending.get("message_text") or "").strip()
+    if not message:
+        return "❌ The draft was empty. Please start again with MESSAGE."
+    if scope == "BROADCAST":
+        recipients = _linked_staff(cur)
+        prefix = "📢 OFFICE MESSAGE — AJAY CHAWLA\n\n"
+    else:
+        recipients = [{
+            "telegram_user_id": pending.get("recipient_telegram_id"),
+            "staff_name": pending.get("recipient_name"),
+            "whatsapp_phone": pending.get("recipient_phone"),
+        }]
+        prefix = "📩 MESSAGE FROM AJAY CHAWLA\n\n"
+    sent: list[str] = []
+    skipped: list[str] = []
+    failed: list[str] = []
+    for recipient in recipients:
+        name = str(recipient.get("staff_name") or "Staff")
+        phone = str(recipient.get("whatsapp_phone") or "")
+        if not phone or not _freeform_window_open(cur, phone):
+            skipped.append(name)
+            _log_delivery(
+                cur, owner_phone, recipient, message, scope, "WINDOW_CLOSED",
+                error="No inbound staff message within the last 24 hours.",
+            )
+            continue
+        try:
+            result = send_text_message(phone, (prefix + message)[:4096])
+            sent.append(name)
+            _log_delivery(
+                cur, owner_phone, recipient, message, scope, "SENT",
+                provider_id=result["provider_message_id"],
+            )
+        except Exception as exc:
+            failed.append(name)
+            _log_delivery(cur, owner_phone, recipient, message, scope, "FAILED", error=str(exc))
+    lines = ["✅ STAFF MESSAGE RESULT", "", f"Sent: {len(sent)}"]
+    if sent:
+        lines.append("• " + ", ".join(sent))
+    if skipped:
+        lines.extend([
+            "", f"Not sent (24-hour window closed): {len(skipped)}",
+            "• " + ", ".join(skipped),
+            "Ask them to send HI to the office bot, then send again.",
+        ])
+    if failed:
+        lines.extend(["", f"Failed: {len(failed)}", "• " + ", ".join(failed)])
+    lines.append("\nNo paid template was used.")
+    return "\n".join(lines)[:4000]
+
+
 def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
-    """Recognize the Telegram-linked owner number before staff/client routing."""
+    """Recognize the linked owner before staff/client routing."""
     if not staff_companion_enabled() or not _admin_id():
         return {"is_owner": False}
     phone = normalize_phone(str(item.get("phone") or ""))
+    incoming = str(item.get("text") or "").strip()
+    action_id = str(item.get("action_id") or "")
     ensure_owner_schema()
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
     try:
@@ -220,7 +430,123 @@ def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
             """, (phone, _admin_id()))
             if not cur.fetchone():
                 return {"is_owner": False}
-            action, argument = classify_owner_command(item.get("text") or "")
+
+            if action_id == "owner_send_cancel":
+                _clear_compose(cur, phone)
+                conn.commit()
+                return {"is_owner": True, "phone": phone, "reply": "✅ Message cancelled."}
+
+            if action_id == "owner_send_confirm":
+                pending = _pending_compose(cur, phone)
+                if not pending or pending.get("stage") != "CONFIRM":
+                    return {
+                        "is_owner": True, "phone": phone,
+                        "reply": "This draft expired. Send MESSAGE to start again.",
+                    }
+                _clear_compose(cur, phone)
+                reply = _deliver(cur, phone, pending)
+                conn.commit()
+                return {"is_owner": True, "phone": phone, "reply": reply}
+
+            if action_id.startswith("owner_staff:"):
+                staff_id = action_id.partition(":")[2]
+                cur.execute("""
+                    SELECT telegram_user_id,staff_name,whatsapp_phone
+                    FROM staff_accounts
+                    WHERE telegram_user_id=%s AND whatsapp_phone IS NOT NULL
+                      AND COALESCE(is_active,TRUE)=TRUE
+                """, (staff_id,))
+                recipient = cur.fetchone()
+                if not recipient:
+                    return {
+                        "is_owner": True, "phone": phone,
+                        "reply": "That staff link is no longer active. Send MESSAGE again.",
+                    }
+                _save_compose(cur, phone, "DIRECT", "AWAITING_TEXT", recipient=dict(recipient))
+                conn.commit()
+                return {
+                    "is_owner": True, "phone": phone,
+                    "reply": f"✍️ Selected {recipient['staff_name']}.\n\nType the private message now, or send CANCEL.",
+                }
+
+            action, argument = classify_owner_command(incoming)
+            if action == "CANCEL":
+                _clear_compose(cur, phone)
+                conn.commit()
+                return {"is_owner": True, "phone": phone, "reply": "✅ Message cancelled."}
+
+            if action == "MENU":
+                _clear_compose(cur, phone)
+                conn.commit()
+                return {"is_owner": True, "phone": phone, "reply": owner_menu(), "menu": True}
+
+            rows = _linked_staff(cur) if action in {"MESSAGE", "BROADCAST", "UNKNOWN"} else []
+            tagged = match_tagged_staff(incoming, rows) if action == "UNKNOWN" else None
+            if tagged:
+                recipient, message = tagged
+                if not message:
+                    _save_compose(cur, phone, "DIRECT", "AWAITING_TEXT", recipient=recipient)
+                    conn.commit()
+                    return {
+                        "is_owner": True, "phone": phone,
+                        "reply": f"✍️ Selected {recipient['staff_name']}.\n\nType the private message now, or send CANCEL.",
+                    }
+                _save_compose(
+                    cur, phone, "DIRECT", "CONFIRM", recipient=recipient, message=message,
+                )
+                conn.commit()
+                return {
+                    "is_owner": True, "phone": phone,
+                    "reply": _confirmation("DIRECT", message, str(recipient["staff_name"])),
+                    "confirm": True,
+                }
+
+            if action == "MESSAGE":
+                if not rows:
+                    return {
+                        "is_owner": True, "phone": phone,
+                        "reply": "No active staff WhatsApp numbers are linked.",
+                    }
+                return {
+                    "is_owner": True, "phone": phone,
+                    "reply": "👥 Choose the staff member who should receive a private message.",
+                    "staff_picker": _staff_picker(rows),
+                }
+
+            if action == "BROADCAST":
+                if not argument:
+                    return {
+                        "is_owner": True, "phone": phone,
+                        "reply": "Usage: BROADCAST <message>\n\nExample:\nBROADCAST Please attend the office meeting at 5 PM.",
+                    }
+                if not rows:
+                    return {"is_owner": True, "phone": phone, "reply": "No linked staff recipients."}
+                _save_compose(cur, phone, "BROADCAST", "CONFIRM", message=argument)
+                conn.commit()
+                return {
+                    "is_owner": True, "phone": phone,
+                    "reply": _confirmation("BROADCAST", argument), "confirm": True,
+                }
+
+            pending = _pending_compose(cur, phone)
+            if action == "UNKNOWN" and pending and pending.get("stage") == "AWAITING_TEXT":
+                if not incoming:
+                    return {"is_owner": True, "phone": phone, "reply": "Please type the message."}
+                recipient = {
+                    "telegram_user_id": pending.get("recipient_telegram_id"),
+                    "staff_name": pending.get("recipient_name"),
+                    "whatsapp_phone": pending.get("recipient_phone"),
+                }
+                _save_compose(
+                    cur, phone, "DIRECT", "CONFIRM", recipient=recipient, message=incoming,
+                )
+                conn.commit()
+                return {
+                    "is_owner": True, "phone": phone,
+                    "reply": _confirmation("DIRECT", incoming, str(recipient["staff_name"])),
+                    "confirm": True,
+                }
+
             if action == "OVERVIEW":
                 reply = _owner_overview(cur)
             elif action == "ACTIVITY":
@@ -230,10 +556,15 @@ def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
             elif action == "CASE":
                 reply = _case_lookup(cur, argument)
             else:
-                reply = owner_menu()
-            return {
-                "is_owner": True, "phone": phone, "reply": reply,
-                "menu": action == "MENU",
-            }
+                names = ", ".join(str(row["staff_name"]) for row in rows)
+                reply = (
+                    "I could not identify that command.\n\n"
+                    f"Linked staff: {names or 'None'}\n\n"
+                    "Use MESSAGE, @Name <message>, BROADCAST <message>, or MENU."
+                )
+            return {"is_owner": True, "phone": phone, "reply": reply}
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
