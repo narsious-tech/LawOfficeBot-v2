@@ -74,7 +74,10 @@ class WhatsAppStaffCompanionTests(unittest.TestCase):
             ("CASE", "CS/3848/2025"),
         )
         self.assertEqual(
-            classify_staff_command("check in"), ("ATTENDANCE_ACTION", "")
+            classify_staff_command("check in"), ("ATTENDANCE_BEGIN", "CHECKIN")
+        )
+        self.assertEqual(
+            classify_staff_command("check out"), ("ATTENDANCE_BEGIN", "CHECKOUT")
         )
         self.assertEqual(
             classify_staff_command("today hearings"), ("TODAY_HEARINGS", "")
@@ -152,6 +155,8 @@ class WhatsAppStaffCompanionTests(unittest.TestCase):
         self.assertIn("Tomorrow Hearings", titles)
         self.assertIn("My Work", titles)
         self.assertIn("Attendance Status", titles)
+        self.assertIn("Check In", titles)
+        self.assertIn("Check Out", titles)
 
     def test_task_picker_contains_private_completion_action(self):
         cur = FakeCursor(fetchall_rows=[[

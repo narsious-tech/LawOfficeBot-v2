@@ -27,6 +27,7 @@ cloud.send_text_message = lambda phone, text: {"provider_message_id": "wamid.tes
 sys.modules["services.whatsapp_cloud"] = cloud
 
 from services.whatsapp_owner_companion import (  # noqa: E402
+    _owner_attendance,
     _owner_overview,
     _owner_work,
     classify_owner_command,
@@ -141,6 +142,31 @@ class OwnerTests(unittest.TestCase):
 
     def test_owner_work_page_command(self):
         self.assertEqual(classify_owner_command("WORK 2"), ("WORK", "2"))
+
+    def test_owner_attendance_command(self):
+        self.assertEqual(
+            classify_owner_command("TODAY ATTENDANCE"), ("ATTENDANCE", "")
+        )
+
+    def test_owner_attendance_lists_present_and_absent_staff(self):
+        cursor = Cursor(task_rows=[
+            {
+                "staff_name": "Happy", "checkin_time": "09:30",
+                "checkout_time": None, "status": "OPEN",
+                "checkin_office_name": "Court Chamber Office",
+                "checkout_office_name": None, "working_minutes": None,
+            },
+            {
+                "staff_name": "Preet", "checkin_time": None,
+                "checkout_time": None, "status": None,
+                "checkin_office_name": None, "checkout_office_name": None,
+                "working_minutes": None,
+            },
+        ])
+        message = _owner_attendance(cursor)
+        self.assertIn("Happy — Present", message)
+        self.assertIn("Preet — Not checked in", message)
+        self.assertIn("Present/attended: 1 of 2", message)
 
     def test_owner_link_requires_telegram_admin(self):
         with patch.dict(os.environ, {"ADMIN_USER_ID": "12345"}):
