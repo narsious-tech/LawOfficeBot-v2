@@ -1,7 +1,7 @@
 """On-demand WhatsApp morning/evening dashboards and owner live controls."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from math import ceil
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -64,16 +64,25 @@ def owner_morning_dashboard() -> str:
     return (build_morning_dashboard() + "\n\nSend LIVE for owner live-hearing control.")[:4000]
 
 
+def evening_target_plan(day=None):
+    """Use the shared office calendar instead of assuming calendar tomorrow."""
+    from services.office_calendar_service import manual_evening_plan
+
+    return manual_evening_plan(day or datetime.now(IST).date())
+
+
 def owner_evening_dashboard() -> str:
     from commands.dashboard import fetch_advocate_diaries_cause_groups
     from commands.evening_dashboard import _flatten_cases
 
-    target = datetime.now(IST).date() + timedelta(days=1)
+    plan = evening_target_plan()
+    target = plan.target_date
     groups, source = fetch_advocate_diaries_cause_groups(target)
     cases = _flatten_cases(groups)
     lines = [
         "🌆 OWNER EVENING DASHBOARD",
-        f"📅 Tomorrow: {target.strftime('%d-%m-%Y')}",
+        f"📅 Next court day: {target.strftime('%d-%m-%Y')}",
+        f"🗓 {plan.heading}",
         f"⚖️ Hearings: {len(cases)}",
         f"🏛 Court groups: {len(groups)}",
         f"🔗 Source: Advocate Diaries {source}",
