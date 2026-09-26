@@ -4,6 +4,7 @@ import hmac
 import hashlib
 import urllib.parse
 import math
+import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -107,54 +108,79 @@ def whatsapp_webhook_receive():
     try:
         alerts = process_whatsapp_webhook(payload)
         for item in alerts:
-            try:
-                owner = handle_owner_inbound(item) if staff_companion_enabled() else {"is_owner": False}
-                if owner.get("is_owner"):
-                    if owner.get("staff_picker"):
-                        send_whatsapp_list(
-                            owner["phone"], owner["reply"], "Select staff",
-                            owner["staff_picker"],
-                        )
-                    elif owner.get("confirm"):
-                        send_whatsapp_buttons(
-                            owner["phone"], owner["reply"],
-                            [("owner_send_confirm", "Send Now"),
-                             ("owner_send_cancel", "Cancel")],
-                        )
-                    elif owner.get("menu"):
-                        send_whatsapp_buttons(
-                            owner["phone"], owner["reply"],
-                            [("overview", "Overview"),
-                             ("owner_message_staff", "Message Staff"),
-                             ("work", "Pending Work")],
-                        )
-                    else:
-                        send_whatsapp_text(owner["phone"], owner["reply"])
-                    continue
-                result = (
-                    handle_staff_inbound(item)
-                    if staff_companion_enabled()
-                    else {"is_staff": False}
-                )
-                if result.get("is_staff"):
-                    if result.get("menu"):
-                        send_whatsapp_buttons(
-                            result["phone"], result["reply"],
-                            [("my_work", "My Work"),
-                             ("office_status", "Office Status"),
-                             ("help", "Help")],
-                        )
-                    else:
-                        send_whatsapp_text(result["phone"], result["reply"])
-                    _notify_whatsapp_staff(result)
-                else:
-                    _notify_whatsapp_inbound(item)
-            except Exception:
-                attendance_app.logger.exception("WhatsApp companion processing failed")
+            threading.Thread(
+                target=_process_whatsapp_inbound,
+                args=(item,),
+                daemon=True,
+            ).start()
         return jsonify({"status": "ok", "new_messages": len(alerts)}), 200
     except Exception:
         attendance_app.logger.exception("WhatsApp webhook processing failed")
         return jsonify({"status": "processing error"}), 500
+
+
+def _process_whatsapp_inbound(item):
+    """Acknowledge Meta quickly, then process slow office services in background."""
+    try:
+        owner = (
+            handle_owner_inbound(item)
+            if staff_companion_enabled()
+            else {"is_owner": False}
+        )
+        if owner.get("is_owner"):
+            if owner.get("staff_picker"):
+                send_whatsapp_list(
+                    owner["phone"], owner["reply"], "Select staff",
+                    owner["staff_picker"],
+                )
+            elif owner.get("confirm"):
+                send_whatsapp_buttons(
+                    owner["phone"], owner["reply"],
+                    [("owner_send_confirm", "Send Now"),
+                     ("owner_send_cancel", "Cancel")],
+                )
+            elif owner.get("menu"):
+                send_whatsapp_buttons(
+                    owner["phone"], owner["reply"],
+                    [("overview", "Overview"),
+                     ("owner_message_staff", "Message Staff"),
+                     ("work", "Pending Work")],
+                )
+            else:
+                send_whatsapp_text(owner["phone"], owner["reply"])
+            return
+
+        result = (
+            handle_staff_inbound(item)
+            if staff_companion_enabled()
+            else {"is_staff": False}
+        )
+        if result.get("is_staff"):
+            if result.get("task_picker"):
+                send_whatsapp_list(
+                    result["phone"], result["reply"], "Choose work",
+                    result["task_picker"],
+                )
+            elif result.get("task_confirm"):
+                task_id = result["task_confirm"]
+                send_whatsapp_buttons(
+                    result["phone"], result["reply"],
+                    [(f"staff_task_complete:{task_id}", "Mark Completed"),
+                     ("staff_task_cancel", "Cancel")],
+                )
+            elif result.get("menu"):
+                send_whatsapp_list(
+                    result["phone"], result["reply"], "Office Menu",
+                    result.get("menu_rows") or [],
+                )
+            else:
+                for reply in result.get("replies") or [result["reply"]]:
+                    send_whatsapp_text(result["phone"], reply)
+            _notify_whatsapp_staff(result)
+        else:
+            _notify_whatsapp_inbound(item)
+    except Exception:
+        attendance_app.logger.exception("WhatsApp companion processing failed")
 
 BOT_TOKEN = os.getenv("TOKEN") or os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
