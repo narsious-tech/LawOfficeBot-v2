@@ -139,6 +139,10 @@ def _process_whatsapp_inbound(item):
                     [("owner_send_confirm", "Send Now"),
                      ("owner_send_cancel", "Cancel")],
                 )
+            elif owner.get("work_nav"):
+                send_whatsapp_buttons(
+                    owner["phone"], owner["reply"], owner["work_nav"],
+                )
             elif owner.get("menu"):
                 send_whatsapp_buttons(
                     owner["phone"], owner["reply"],
