@@ -28,6 +28,7 @@ sys.modules["services.whatsapp_cloud"] = cloud
 
 from services.whatsapp_owner_companion import (  # noqa: E402
     _owner_overview,
+    _owner_work,
     classify_owner_command,
     handle_owner_inbound,
     link_owner_phone,
@@ -105,6 +106,21 @@ class OwnerTests(unittest.TestCase):
         self.assertIn("Overdue: 1", result["reply"])
         self.assertIn("Happy: 2", result["reply"])
         self.assertIn("Priya: 1", result["reply"])
+
+    def test_owner_work_shows_case_title_and_number(self):
+        cursor = Cursor(task_rows=[{
+            "task_id": 56,
+            "staff_name": "Preet",
+            "task_text": "Correct address",
+            "case_number": "CS/3712/2018",
+            "case_title": "Asha Rani versus Mohan Lal",
+            "deadline": "05-05-2025",
+            "due_at": None,
+        }])
+        message = _owner_work(cursor)
+        self.assertIn("Asha Rani versus Mohan Lal", message)
+        self.assertIn("CS/3712/2018", message)
+        self.assertNotIn("⚖️ CS/3712/2018", message)
 
     def test_owner_link_requires_telegram_admin(self):
         with patch.dict(os.environ, {"ADMIN_USER_ID": "12345"}):
