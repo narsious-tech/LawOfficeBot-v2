@@ -26,6 +26,7 @@ sys.modules.setdefault("services.whatsapp_cloud", cloud)
 
 from services.whatsapp_staff_companion import (  # noqa: E402
     classify_staff_command,
+    menu_rows,
     staff_companion_enabled,
 )
 
@@ -40,8 +41,25 @@ class WhatsAppStaffCompanionTests(unittest.TestCase):
             classify_staff_command("CASE CS/3848/2025"),
             ("CASE", "CS/3848/2025"),
         )
-        self.assertEqual(classify_staff_command("check in"), ("ATTENDANCE", ""))
+        self.assertEqual(
+            classify_staff_command("Today Hearings"), ("TODAY_HEARINGS", "")
+        )
+        self.assertEqual(
+            classify_staff_command("Tomorrow Hearings"), ("TOMORROW_HEARINGS", "")
+        )
+        self.assertEqual(
+            classify_staff_command("Attendance Status"), ("ATTENDANCE_STATUS", "")
+        )
+        self.assertEqual(
+            classify_staff_command("check in"), ("ATTENDANCE_ACTION", "")
+        )
         self.assertEqual(classify_staff_command("unknown"), ("MENU", ""))
+
+    def test_staff_menu_fits_whatsapp_list_limit(self):
+        rows = menu_rows()
+        self.assertLessEqual(len(rows), 10)
+        self.assertTrue(any(title == "Today Hearings" for _, title, _ in rows))
+        self.assertTrue(any(title == "My Work" for _, title, _ in rows))
 
     def test_feature_flag_is_off_by_default(self):
         previous = os.environ.pop("WHATSAPP_STAFF_COMPANION_ENABLED", None)
