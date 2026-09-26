@@ -25,6 +25,11 @@ from services.whatsapp_staff_companion import (
     staff_companion_enabled,
     unlink_staff_phone,
 )
+from services.whatsapp_owner_companion import (
+    link_owner_phone,
+    linked_owner_phone,
+    unlink_owner_phone,
+)
 
 
 def _admin(user_id: int | None) -> bool:
@@ -131,6 +136,43 @@ async def whatsappstaff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+async def linkwhatsappowner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    if len(context.args) != 1:
+        await update.effective_message.reply_text(
+            "Usage: /linkwhatsappowner 919815908700\n"
+            "Enter your personal WhatsApp number, never the office sender number."
+        )
+        return
+    try:
+        phone = await asyncio.to_thread(
+            link_owner_phone, context.args[0], update.effective_user.id
+        )
+        await update.effective_message.reply_text(
+            f"✅ Owner WhatsApp linked: +{phone}\n"
+            "Send HI from this phone to the office WhatsApp number."
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(f"❌ Owner link failed: {exc}")
+
+
+async def whatsappowner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    phone = await asyncio.to_thread(linked_owner_phone)
+    await update.effective_message.reply_text(
+        f"Owner WhatsApp: +{phone}" if phone else "Owner WhatsApp: not linked."
+    )
+
+
+async def unlinkwhatsappowner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    await asyncio.to_thread(unlink_owner_phone, update.effective_user.id)
+    await update.effective_message.reply_text("✅ Owner WhatsApp number unlinked.")
+
+
 async def testwhatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _authorize(update):
         return
@@ -198,6 +240,9 @@ def register_whatsapp_handlers(app) -> None:
     ensure_whatsapp_schema()
     ensure_whatsapp_staff_schema()
     app.add_handler(CommandHandler("whatsappstatus", whatsappstatus), group=-8)
+    app.add_handler(CommandHandler("linkwhatsappowner", linkwhatsappowner), group=-8)
+    app.add_handler(CommandHandler("whatsappowner", whatsappowner), group=-8)
+    app.add_handler(CommandHandler("unlinkwhatsappowner", unlinkwhatsappowner), group=-8)
     app.add_handler(CommandHandler("testwhatsapp", testwhatsapp), group=-8)
     app.add_handler(CommandHandler("whatsappinbox", whatsappinbox), group=-8)
     app.add_handler(CommandHandler("retrywhatsapp", retrywhatsapp), group=-8)
