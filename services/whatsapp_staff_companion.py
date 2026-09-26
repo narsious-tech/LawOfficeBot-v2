@@ -4,7 +4,9 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -17,6 +19,28 @@ from services.staff_activity_service import (
 from services.whatsapp_cloud import normalize_phone
 
 CLOSED = ("COMPLETED", "COMPLETE", "DONE", "CLOSED", "CANCELLED", "VERIFIED")
+OFFICE_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def _deadline_date(value: Any) -> date | None:
+    """Parse current and legacy task deadlines without failing on free text."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        pass
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def staff_companion_enabled() -> bool:
@@ -222,15 +246,19 @@ def _my_work(cur, staff_name: str) -> str:
 
 def _office_status(cur, staff: dict[str, Any]) -> str:
     cur.execute("""
-        SELECT COUNT(*) AS pending_count,
-               COUNT(*) FILTER (WHERE due_at<NOW()) AS overdue_count
+        SELECT due_at AS due_at, deadline AS deadline
         FROM tasks
         WHERE LOWER(TRIM(COALESCE(assigned_to,'')))=LOWER(TRIM(%s))
           AND UPPER(COALESCE(status,'PENDING'))<>ALL(%s)
     """, (staff["staff_name"], list(CLOSED)))
-    counts = cur.fetchone() or {}
-    pending = counts.get("pending_count", 0)
-    overdue = counts.get("overdue_count", 0)
+    task_rows = cur.fetchall()
+    today = datetime.now(OFFICE_TZ).date()
+    pending = len(task_rows)
+    overdue = 0
+    for row in task_rows:
+        due_date = _deadline_date(row.get("due_at") or row.get("deadline"))
+        if due_date and due_date < today:
+            overdue += 1
     attendance = "Not checked in"
     cur.execute(
         "SELECT to_regclass('public.attendance_sessions') AS attendance_table"
