@@ -128,7 +128,18 @@ def _process_whatsapp_inbound(item):
             else {"is_owner": False}
         )
         if owner.get("is_owner"):
-            if owner.get("staff_picker"):
+            if owner.get("list_rows"):
+                send_whatsapp_list(
+                    owner["phone"], owner["reply"],
+                    owner.get("list_button") or "Choose",
+                    owner["list_rows"],
+                    section_title=owner.get("list_section") or "Options",
+                )
+            elif owner.get("buttons"):
+                send_whatsapp_buttons(
+                    owner["phone"], owner["reply"], owner["buttons"],
+                )
+            elif owner.get("staff_picker"):
                 send_whatsapp_list(
                     owner["phone"], owner["reply"], "Select staff",
                     owner["staff_picker"],
