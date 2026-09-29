@@ -129,6 +129,10 @@ from commands.dashboard import (
     fetch_advocate_diaries_cause_groups,
     normalize_space,
 )
+from services.whatsapp_morning_delivery_service import (
+    configured_morning_time,
+    whatsapp_staff_morning_job,
+)
 from commands.files import (
     WAITING_FILE,
     CONFIRM_DUPLICATE_UPLOAD,
@@ -212,7 +216,6 @@ from commands.mobile_update_queue import (
 from commands.live_hearings import livehearings, live_hearing_callback, hearing_completion_handler
 from services.ad_writeback import retry_pending as retry_ad_writebacks
 from services.ecourts_orchestration_service import retry_pending_ecourts_ad_syncs
-from services.staff_hearing_service import fetch_staff_hearings, hearing_message_chunks
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -853,31 +856,88 @@ async def test_ad(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(str(e))
 async def todayhearings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import time
+    import requests
+    from datetime import datetime
+
     await update.message.reply_text("Fetching hearings...")
 
-    target_date = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    target_date = datetime.now().strftime("%Y-%m-%d")
 
     if context.args:
         try:
             target_date = datetime.strptime(
                 context.args[0],
                 "%d-%m-%Y"
-            ).date()
-        except ValueError:
+            ).strftime("%Y-%m-%d")
+        except:
             await update.message.reply_text(
                 "Use format: /todayhearings DD-MM-YYYY"
             )  
             return
 
-    try:
-        result = await asyncio.to_thread(fetch_staff_hearings, target_date)
-        for message in hearing_message_chunks(result):
-            await update.message.reply_text(message)
-    except Exception as exc:
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}"
+    }
+
+    all_cases = []
+
+    for page in range(1, 61):
+        try:
+            r = requests.get(
+                f"{AD_API}/court_cases?page={page}",
+                headers=headers,
+                timeout=(10, 60)
+            )
+
+            if r.status_code == 404:
+                break
+
+            if r.status_code != 200:
+                await update.message.reply_text(
+                    f"Failed at page {page}\nStatus: {r.status_code}"
+                )
+                return
+
+            data = r.json().get("data", [])
+
+            if not data:
+                break
+
+            all_cases.extend(data)
+
+            time.sleep(1)
+
+        except requests.exceptions.Timeout:
+            continue
+
+        except requests.exceptions.RequestException:
+            continue
+
+    matched_cases = [
+        c for c in all_cases
+        if c.get("next_date") == target_date
+    ]
+
+    if not matched_cases:
         await update.message.reply_text(
-            "Unable to fetch Advocate Diaries hearings safely.\n"
-            f"{type(exc).__name__}: {str(exc)[:500]}"
+            f"No hearings on {target_date}"
         )
+        return
+
+    msg = "\n\n".join(
+        [
+            f"📌 {c['case_number']}\n"
+            f"⚖ {c['case_title']}\n"
+            f"👨‍⚖ Judge: {c['judge_name']}\n"
+            f"📝 Stage: {c['purpose']}\n"
+           f"━━━━━━━━━━━━━━"
+            for c in matched_cases
+        ]
+    )
+
+    for i in range(0, len(msg), 3500):
+        await update.message.reply_text(msg[i:i+3500])
 
 async def tomorrowcause(update, context):
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%d-%m-%Y")
@@ -4035,17 +4095,24 @@ app.job_queue.run_repeating(
     name="advocate_diaries_hearing_writeback_retry",
 )
 
-# Low-cost mode: reconcile only the free Google Drive eCourts backups once on
-# the following morning.  The former recurring Order Inbox job called the paid
-# CASE_DETAIL API and is intentionally not scheduled.
-app.job_queue.run_daily(
+app.job_queue.run_repeating(
     ecourts_backup_sync_job,
-    time=time(
-        hour=max(0, min(23, int(os.getenv("ECOURTS_BACKUP_SYNC_HOUR_IST", "7")))),
-        minute=max(0, min(59, int(os.getenv("ECOURTS_BACKUP_SYNC_MINUTE_IST", "30")))),
-        tzinfo=ZoneInfo("Asia/Kolkata"),
-    ),
-    name="ecourts_drive_backup_next_day_reconciliation",
+    interval=max(3600, int(os.getenv("ECOURTS_BACKUP_SYNC_HOURS", "6")) * 3600),
+    first=180,
+    name="ecourts_drive_backup_reconciliation",
+)
+
+app.job_queue.run_repeating(
+    ecourts_order_inbox_job,
+    interval=max(300, int(os.getenv("ECOURTS_ORDER_POLL_SECONDS", "900"))),
+    first=240,
+    name="ecourts_drive_order_inbox",
+)
+
+app.job_queue.run_daily(
+    ecourts_daily_operations_job,
+    time=time(hour=8, minute=35, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="ecourts_admin_operations_835am",
 )
 
 app.job_queue.run_repeating(
@@ -4185,6 +4252,12 @@ app.job_queue.run_daily(
         )
     ),
     name="staff_morning_briefs_910am"
+)
+
+app.job_queue.run_daily(
+    whatsapp_staff_morning_job,
+    time=configured_morning_time(),
+    name="whatsapp_staff_morning_1005am"
 )
 
 app.job_queue.run_daily(

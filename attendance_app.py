@@ -201,6 +201,17 @@ def _process_whatsapp_inbound(item):
             _notify_whatsapp_staff(result)
             if result.get("attendance_notification"):
                 send_attendance_notification(result["attendance_notification"])
+            if result.get("attendance_action") == "CHECKIN":
+                try:
+                    from services.whatsapp_morning_delivery_service import (
+                        deliver_checkin_catchup,
+                    )
+
+                    deliver_checkin_catchup(result["staff"])
+                except Exception:
+                    attendance_app.logger.exception(
+                        "WhatsApp morning check-in catch-up failed"
+                    )
         else:
             _notify_whatsapp_inbound(item)
     except Exception:
