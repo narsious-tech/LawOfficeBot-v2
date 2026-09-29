@@ -199,6 +199,8 @@ def _process_whatsapp_inbound(item):
                 for reply in result.get("replies") or [result["reply"]]:
                     send_whatsapp_text(result["phone"], reply)
             _notify_whatsapp_staff(result)
+            if result.get("attendance_notification"):
+                send_attendance_notification(result["attendance_notification"])
         else:
             _notify_whatsapp_inbound(item)
     except Exception:
@@ -296,7 +298,7 @@ def send_attendance_notification(text):
         return
 
     try:
-        requests.post(
+        response = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
             json={
                 "chat_id": chat_id,
@@ -305,6 +307,7 @@ def send_attendance_notification(text):
             },
             timeout=10
         )
+        response.raise_for_status()
     except Exception as exc:
         print(
             "ATTENDANCE NOTIFICATION FAILED: "
