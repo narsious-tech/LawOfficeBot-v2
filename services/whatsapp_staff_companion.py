@@ -530,6 +530,7 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
     completed_task = False
     attendance_success = False
     attendance_notification: str | None = None
+    attendance_action: str | None = None
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -625,6 +626,7 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
                 reply = result["reply"]
                 attendance_success = bool(result.get("success"))
                 attendance_notification = result.get("group_notification")
+                attendance_action = argument if attendance_success else None
                 replies = [reply]
             elif action == "ATTENDANCE_CANCEL":
                 from services.whatsapp_attendance_service import cancel_attendance
@@ -686,5 +688,6 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
         "task_picker": task_picker, "task_confirm": task_confirm,
         "attendance_confirm": attendance_confirm,
         "attendance_notification": attendance_notification,
+        "attendance_action": attendance_action,
         "activity_id": activity_id, "incoming": incoming, "phone": phone,
     }
