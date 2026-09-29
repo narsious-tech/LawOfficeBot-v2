@@ -21,6 +21,38 @@ def _now_local() -> datetime:
     return datetime.now(OFFICE_TZ).replace(tzinfo=None)
 
 
+def build_attendance_notification(
+    *,
+    staff_name: str,
+    action: str,
+    office_name: str,
+    distance_meters: float,
+    event_time: datetime,
+    map_link: str,
+    working_minutes: int | None = None,
+) -> str:
+    """Build the Telegram office-group alert for a WhatsApp attendance punch."""
+    action = str(action or "").upper()
+    label = "CHECK-IN" if action == "CHECKIN" else "CHECK-OUT"
+    icon = "🟢" if action == "CHECKIN" else "🔴"
+    lines = [
+        f"{icon} STAFF {label}",
+        "",
+        f"👤 Staff: {staff_name}",
+        f"🏢 Office: {office_name}",
+        "📍 Location recorded",
+        f"📱 Source: WhatsApp",
+        f"📏 Distance from office: {round(float(distance_meters))} metres",
+        f"🕒 Time: {event_time.strftime('%d-%m-%Y %I:%M %p')}",
+    ]
+    if action == "CHECKOUT" and working_minutes is not None:
+        lines.append(
+            f"⏱ Working time: {working_minutes // 60}h {working_minutes % 60}m"
+        )
+    lines.append(f"🗺 Map: {map_link}")
+    return "\n".join(lines)
+
+
 def _distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     radius = 6371000.0
     first = math.radians(lat1)
@@ -374,7 +406,20 @@ def confirm_attendance(phone: str, staff: dict[str, Any], action: str) -> dict[s
         ]
         if working_minutes is not None:
             lines.append(f"⏱ Working time: {working_minutes // 60}h {working_minutes % 60}m")
-        return {"success": True, "reply": "\n".join(lines)}
+        notification = build_attendance_notification(
+            staff_name=str(staff["staff_name"]),
+            action=action,
+            office_name=str(pending["office_name"]),
+            distance_meters=float(pending["distance_meters"]),
+            event_time=now,
+            map_link=map_link,
+            working_minutes=working_minutes,
+        )
+        return {
+            "success": True,
+            "reply": "\n".join(lines),
+            "group_notification": notification,
+        }
     except Exception:
         conn.rollback()
         raise
