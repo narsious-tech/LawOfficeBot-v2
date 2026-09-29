@@ -30,6 +30,10 @@ from services.whatsapp_owner_companion import (
     linked_owner_phone,
     unlink_owner_phone,
 )
+from services.whatsapp_morning_delivery_service import (
+    automatic_morning_enabled,
+    configured_morning_time,
+)
 
 
 def _admin(user_id: int | None) -> bool:
@@ -64,6 +68,7 @@ async def whatsappstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if public_url and not public_url.startswith("http"):
         public_url = "https://" + public_url
     webhook = public_url.rstrip("/") + "/whatsapp/webhook" if public_url else "Not resolved"
+    morning_time = configured_morning_time()
     await update.effective_message.reply_text(
         "📲 <b>WHATSAPP CLOUD STATUS</b>\n\n"
         f"Transport: <b>{'✅ Ready' if transport_ready() else '⚠️ Not ready'}</b>\n"
@@ -75,6 +80,9 @@ async def whatsappstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Graph API: {html.escape(cfg['graph_version'])}\n\n"
         f"Staff Companion: {'✅ Enabled' if staff_companion_enabled() else '⚠️ Disabled'}\n"
         f"Linked staff numbers: {len(staff_links)}\n\n"
+        f"Automatic morning: {'✅ Enabled' if automatic_morning_enabled() else '⚠️ Disabled'}\n"
+        f"Morning delivery time: {morning_time.strftime('%I:%M %p')} IST\n"
+        "Paid template fallback: No\n\n"
         f"Webhook URL:\n<code>{html.escape(webhook)}</code>\n\n"
         "Manual wa.me sending remains available as a fallback.",
         parse_mode=ParseMode.HTML,
@@ -236,6 +244,41 @@ async def retrywhatsapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"❌ Retry failed:\n{exc}")
 
 
+async def testwhatsappmorning(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Usage: /testwhatsappmorning Exact Staff Name\n"
+            "The staff member must have messaged the office WhatsApp within 24 hours."
+        )
+        return
+    from services.whatsapp_morning_delivery_service import deliver_automatic_morning
+
+    staff_name = " ".join(context.args).strip()
+    try:
+        result = await asyncio.to_thread(
+            deliver_automatic_morning,
+            staff_name=staff_name,
+            force=True,
+            trigger="ADMIN_TEST",
+        )
+        failed = result.get("failed") or []
+        await update.effective_message.reply_text(
+            "📲 WHATSAPP MORNING TEST\n\n"
+            f"Sent: {', '.join(result.get('sent') or []) or 'None'}\n"
+            f"24-hour window closed: {', '.join(result.get('window_closed') or []) or 'None'}\n"
+            f"Not linked/found: {', '.join(result.get('not_linked') or []) or 'None'}\n"
+            f"Failed: {', '.join(str(item.get('staff')) for item in failed) or 'None'}\n"
+            f"Skipped: {result.get('skipped') or 'No'}\n\n"
+            "No paid template was used."
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"❌ WhatsApp morning test failed:\n{type(exc).__name__}: {exc}"
+        )
+
+
 def register_whatsapp_handlers(app) -> None:
     ensure_whatsapp_schema()
     ensure_whatsapp_staff_schema()
@@ -249,6 +292,9 @@ def register_whatsapp_handlers(app) -> None:
     app.add_handler(CommandHandler("linkwhatsapp", linkwhatsapp), group=-8)
     app.add_handler(CommandHandler("unlinkwhatsapp", unlinkwhatsapp), group=-8)
     app.add_handler(CommandHandler("whatsappstaff", whatsappstaff), group=-8)
+    app.add_handler(
+        CommandHandler("testwhatsappmorning", testwhatsappmorning), group=-8
+    )
 
 
 async def whatsapp_retry_job(context: ContextTypes.DEFAULT_TYPE):
