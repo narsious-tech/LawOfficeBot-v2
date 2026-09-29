@@ -3,6 +3,7 @@ import sys
 import time
 import types
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 psycopg2 = sys.modules.get("psycopg2") or types.ModuleType("psycopg2")
@@ -19,6 +20,7 @@ sys.modules["config"] = config
 from services.whatsapp_attendance_service import (  # noqa: E402
     _distance_meters,
     _fresh_timestamp,
+    build_attendance_notification,
     review_attendance_location,
 )
 
@@ -44,6 +46,34 @@ class WhatsAppAttendanceTests(unittest.TestCase):
                 forwarded=True,
             )
         self.assertIn("Forwarded locations", result["reply"])
+
+    def test_group_checkin_notification_contains_location_and_source(self):
+        message = build_attendance_notification(
+            staff_name="Samar Sharma",
+            action="CHECKIN",
+            office_name="Court Chamber Office",
+            distance_meters=10.4,
+            event_time=datetime(2026, 9, 29, 10, 34),
+            map_link="https://www.google.com/maps?q=30.9,75.83",
+        )
+        self.assertIn("🟢 STAFF CHECK-IN", message)
+        self.assertIn("Staff: Samar Sharma", message)
+        self.assertIn("Source: WhatsApp", message)
+        self.assertIn("Distance from office: 10 metres", message)
+        self.assertIn("29-09-2026 10:34 AM", message)
+
+    def test_group_checkout_notification_contains_working_time(self):
+        message = build_attendance_notification(
+            staff_name="Samar Sharma",
+            action="CHECKOUT",
+            office_name="Court Chamber Office",
+            distance_meters=4,
+            event_time=datetime(2026, 9, 29, 18, 5),
+            map_link="https://www.google.com/maps?q=30.9,75.83",
+            working_minutes=451,
+        )
+        self.assertIn("🔴 STAFF CHECK-OUT", message)
+        self.assertIn("Working time: 7h 31m", message)
 
 
 if __name__ == "__main__":
