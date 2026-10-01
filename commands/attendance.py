@@ -81,6 +81,19 @@ def ensure_staff_profile_columns(cur) -> None:
     """)
 
 
+def upsert_staff_directory_role(cur, staff_name: str, role_label: str) -> None:
+    """Update/insert the legacy staff directory without requiring a unique key."""
+    cur.execute("""
+        UPDATE staff SET role=%s
+        WHERE LOWER(TRIM(name))=LOWER(TRIM(%s))
+    """, (role_label, staff_name))
+    if cur.rowcount == 0:
+        cur.execute(
+            "INSERT INTO staff(name,role) VALUES (%s,%s)",
+            (staff_name, role_label),
+        )
+
+
 async def monitor_attendance_job(context):
     date = datetime.today().strftime("%Y-%m-%d")
 
@@ -271,10 +284,9 @@ async def setstaffprofile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             SET role=%s,attendance_office_scope=%s
             WHERE telegram_user_id=%s
         """, (role, scope, telegram_user_id))
-        cur.execute("""
-            INSERT INTO staff(name,role) VALUES (%s,%s)
-            ON CONFLICT(name) DO UPDATE SET role=EXCLUDED.role
-        """, (saved_name, STAFF_ROLE_LABELS[role]))
+        # Production databases created by early bot versions may not have a
+        # UNIQUE constraint on staff.name.
+        upsert_staff_directory_role(cur, saved_name, STAFF_ROLE_LABELS[role])
         cur.execute("""
             INSERT INTO staff_profile_audit(
                 telegram_user_id,staff_name,old_role,new_role,
