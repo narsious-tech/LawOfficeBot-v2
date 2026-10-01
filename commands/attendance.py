@@ -21,31 +21,70 @@ import psycopg2
 from config import DATABASE_URL
 import os
 from datetime import datetime
-import asyncio
-import logging
 from utils.attendance_webapp import get_attendance_app_url
 from bs4 import BeautifulSoup
 
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
-logger = logging.getLogger(__name__)
+
+STAFF_ROLE_LABELS = {
+    "staff": "Staff",
+    "junior_associate": "Junior Associate",
+    "clerk": "Clerk",
+    "supervisor": "Supervisor",
+    "manager": "Manager",
+}
+ATTENDANCE_SCOPE_LABELS = {
+    "ALL": "All approved offices",
+    "COURT_ONLY": "Court Chamber Office only",
+    "EVENING_ONLY": "Evening Office only",
+}
+
+
+def normalize_staff_role(value: str) -> str:
+    role = "_".join(str(value or "").strip().lower().replace("-", " ").split())
+    if role not in STAFF_ROLE_LABELS:
+        raise ValueError(
+            "Role must be staff, junior_associate, clerk, supervisor or manager."
+        )
+    return role
+
+
+def normalize_attendance_scope(value: str) -> str:
+    scope = "_".join(str(value or "").strip().upper().replace("-", " ").split())
+    if scope not in ATTENDANCE_SCOPE_LABELS:
+        raise ValueError("Office scope must be all, court_only or evening_only.")
+    return scope
+
+
+def ensure_staff_profile_columns(cur) -> None:
+    cur.execute("""
+        ALTER TABLE staff_accounts
+        ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'staff'
+    """)
+    cur.execute("""
+        ALTER TABLE staff_accounts
+        ADD COLUMN IF NOT EXISTS attendance_office_scope TEXT DEFAULT 'ALL'
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS staff_profile_audit (
+            id BIGSERIAL PRIMARY KEY,
+            telegram_user_id BIGINT NOT NULL,
+            staff_name TEXT NOT NULL,
+            old_role TEXT,
+            new_role TEXT NOT NULL,
+            old_office_scope TEXT,
+            new_office_scope TEXT NOT NULL,
+            changed_by BIGINT,
+            changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
 
 
 async def monitor_attendance_job(context):
     date = datetime.today().strftime("%Y-%m-%d")
 
-    try:
-        # Advocate Diaries is external and can be slow.  Keep its blocking HTTP
-        # work off Telegram's event loop so email/WhatsApp jobs remain timely.
-        response = await asyncio.to_thread(web.attendance, date)
-        response.raise_for_status()
-    except Exception as exc:
-        logger.warning(
-            "Attendance monitor skipped; Advocate Diaries unavailable: %s: %s",
-            type(exc).__name__,
-            exc,
-        )
-        return
+    response = web.attendance(date)
     soup = BeautifulSoup(response.text, "lxml")
 
     tbody = soup.find("tbody")
@@ -124,19 +163,34 @@ async def monitor_attendance_job(context):
     conn.close()
 
 async def linkstaff(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 3:
+    raw_args = " ".join(context.args).strip()
+    if "|" in raw_args:
+        parts = [part.strip() for part in raw_args.split("|", 2)]
+        if len(parts) != 3 or not all(parts):
+            parts = []
+    else:
+        parts = []
+
+    if parts:
+        staff_name, ad_email, ad_password = parts
+    elif len(context.args) >= 3:
+        staff_name = context.args[0]
+        ad_email = context.args[1]
+        ad_password = " ".join(context.args[2:])
+    else:
         await update.effective_message.reply_text(
-            "Usage:\n/linkstaff STAFF_NAME EMAIL PASSWORD"
+            "Usage:\n"
+            "/linkstaff Staff Name | EMAIL | PASSWORD\n\n"
+            "The older single-word-name format also remains supported."
         )
         return
 
     telegram_user_id = update.effective_user.id
-    staff_name = context.args[0]
-    ad_email = context.args[1]
-    ad_password = " ".join(context.args[2:])
 
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
+
+    ensure_staff_profile_columns(cur)
 
     cur.execute("""
         INSERT INTO staff_accounts
@@ -156,6 +210,97 @@ async def linkstaff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.effective_message.reply_text(
         f"✅ Staff account linked for {staff_name}"
+    )
+
+
+async def setstaffprofile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set an exact staff member's role and attendance-office restriction."""
+    if not _is_staff_admin(update):
+        await update.effective_message.reply_text(
+            "❌ This command is restricted to the administrator."
+        )
+        return
+
+    raw = " ".join(context.args).strip()
+    parts = [part.strip() for part in raw.split("|")]
+    if len(parts) != 3 or not all(parts):
+        await update.effective_message.reply_text(
+            "Usage:\n"
+            "/setstaffprofile Exact Staff Name | junior_associate | court_only"
+        )
+        return
+
+    staff_name, role_raw, scope_raw = parts
+    try:
+        role = normalize_staff_role(role_raw)
+        scope = normalize_attendance_scope(scope_raw)
+    except ValueError as exc:
+        await update.effective_message.reply_text(f"❌ {exc}")
+        return
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    try:
+        ensure_staff_profile_columns(cur)
+        cur.execute("""
+            SELECT telegram_user_id,staff_name,COALESCE(role,'staff'),
+                   COALESCE(attendance_office_scope,'ALL')
+            FROM staff_accounts
+            WHERE LOWER(TRIM(staff_name))=LOWER(TRIM(%s))
+              AND COALESCE(is_active,TRUE)=TRUE
+            FOR UPDATE
+        """, (staff_name,))
+        matches = cur.fetchall()
+        if not matches:
+            conn.rollback()
+            await update.effective_message.reply_text(
+                "❌ No active staff account matched that exact name.\n"
+                "The employee must complete /linkstaff first."
+            )
+            return
+        if len(matches) > 1:
+            conn.rollback()
+            await update.effective_message.reply_text(
+                "❌ More than one account has that name. Use a unique exact staff name."
+            )
+            return
+
+        telegram_user_id, saved_name, old_role, old_scope = matches[0]
+        cur.execute("""
+            UPDATE staff_accounts
+            SET role=%s,attendance_office_scope=%s
+            WHERE telegram_user_id=%s
+        """, (role, scope, telegram_user_id))
+        cur.execute("""
+            INSERT INTO staff(name,role) VALUES (%s,%s)
+            ON CONFLICT(name) DO UPDATE SET role=EXCLUDED.role
+        """, (saved_name, STAFF_ROLE_LABELS[role]))
+        cur.execute("""
+            INSERT INTO staff_profile_audit(
+                telegram_user_id,staff_name,old_role,new_role,
+                old_office_scope,new_office_scope,changed_by
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+        """, (
+            telegram_user_id, saved_name, old_role, role, old_scope, scope,
+            update.effective_user.id if update.effective_user else None,
+        ))
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        await update.effective_message.reply_text(
+            f"❌ Staff profile update failed safely:\n{type(exc).__name__}: {exc}"
+        )
+        return
+    finally:
+        cur.close()
+        conn.close()
+
+    await update.effective_message.reply_text(
+        "✅ STAFF PROFILE UPDATED\n\n"
+        f"👤 {saved_name}\n"
+        f"🎓 Role: {STAFF_ROLE_LABELS[role]}\n"
+        f"🏢 Attendance: {ATTENDANCE_SCOPE_LABELS[scope]}\n"
+        "🔒 Administrative controls: Blocked"
     )
 
 
@@ -201,12 +346,15 @@ async def linkedstaff(
     cur = conn.cursor()
 
     try:
+        ensure_staff_profile_columns(cur)
         cur.execute("""
             SELECT
                 telegram_user_id,
                 staff_name,
                 ad_email,
-                is_active
+                is_active,
+                COALESCE(role,'staff'),
+                COALESCE(attendance_office_scope,'ALL')
             FROM staff_accounts
             WHERE telegram_user_id IS NOT NULL
               AND COALESCE(is_active, TRUE) = TRUE
@@ -234,6 +382,8 @@ async def linkedstaff(
         staff_name,
         ad_email,
         is_active,
+        role,
+        office_scope,
     ) in enumerate(rows, start=1):
         status = "Active" if is_active else "Inactive"
 
@@ -241,6 +391,8 @@ async def linkedstaff(
             f"{index}. {staff_name}",
             f"   Telegram ID: {telegram_user_id}",
             f"   Email: {ad_email or '-'}",
+            f"   Role: {STAFF_ROLE_LABELS.get(role, str(role).replace('_', ' ').title())}",
+            f"   Attendance: {ATTENDANCE_SCOPE_LABELS.get(office_scope, office_scope)}",
             f"   Status: {status}",
             "",
         ])
