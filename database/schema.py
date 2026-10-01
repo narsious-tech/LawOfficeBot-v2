@@ -133,6 +133,8 @@ def initialize_database() -> None:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
+        cur.execute("ALTER TABLE staff_accounts ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'staff'")
+        cur.execute("ALTER TABLE staff_accounts ADD COLUMN IF NOT EXISTS attendance_office_scope TEXT DEFAULT 'ALL'")
         conn.commit()
         staff_data = [
             ("Preet", "Office Manager / Law Student"),
