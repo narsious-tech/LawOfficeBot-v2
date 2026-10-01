@@ -95,6 +95,14 @@ def ensure_whatsapp_staff_schema() -> None:
                 ADD COLUMN IF NOT EXISTS whatsapp_phone TEXT
             """)
             cur.execute("""
+                ALTER TABLE staff_accounts
+                ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'staff'
+            """)
+            cur.execute("""
+                ALTER TABLE staff_accounts
+                ADD COLUMN IF NOT EXISTS attendance_office_scope TEXT DEFAULT 'ALL'
+            """)
+            cur.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS staff_accounts_whatsapp_phone_uidx
                 ON staff_accounts(whatsapp_phone)
                 WHERE whatsapp_phone IS NOT NULL
@@ -222,7 +230,8 @@ def linked_staff_phones() -> list[dict[str, Any]]:
 
 def _staff_for_phone(cur, phone: str) -> dict[str, Any] | None:
     cur.execute("""
-        SELECT telegram_user_id,staff_name
+        SELECT telegram_user_id,staff_name,COALESCE(role,'staff') AS role,
+               COALESCE(attendance_office_scope,'ALL') AS attendance_office_scope
         FROM staff_accounts
         WHERE whatsapp_phone=%s AND COALESCE(is_active,TRUE)=TRUE
         LIMIT 1
@@ -670,7 +679,7 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
         ),
         user_id=int(staff["telegram_user_id"]),
         staff_name=str(staff["staff_name"]),
-        staff_role="staff",
+        staff_role=str(staff.get("role") or "staff"),
         chat_id=None,
         chat_type="whatsapp_private",
         chat_title="WhatsApp Staff Companion",

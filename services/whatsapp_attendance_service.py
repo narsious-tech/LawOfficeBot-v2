@@ -157,14 +157,24 @@ def begin_attendance(phone: str, staff: dict[str, Any], action: str) -> str:
     )
 
 
-def _nearest_office(cur, latitude: float, longitude: float, action: str) -> dict[str, Any]:
+def _nearest_office(
+    cur, latitude: float, longitude: float, action: str, office_scope: str = "ALL"
+) -> dict[str, Any]:
     permission = "allow_checkin" if action == "CHECKIN" else "allow_checkout"
+    scope = str(office_scope or "ALL").upper()
+    scope_office = {
+        "COURT_ONLY": "Court Chamber Office",
+        "EVENING_ONLY": "Evening Office",
+    }.get(scope)
+    scope_sql = " AND LOWER(office_name)=LOWER(%s)" if scope_office else ""
+    params = (scope_office,) if scope_office else ()
     cur.execute(f"""
         SELECT id,office_name,latitude,longitude,allowed_radius_meters
         FROM attendance_offices
         WHERE is_active=TRUE AND {permission}=TRUE
+        {scope_sql}
         ORDER BY id
-    """)
+    """, params)
     nearest = None
     for row in cur.fetchall():
         candidate = dict(row)
@@ -226,7 +236,10 @@ def review_attendance_location(
                 cur.execute("DELETE FROM whatsapp_attendance_pending WHERE whatsapp_phone=%s", (phone,))
                 conn.commit()
                 return {"reply": "ℹ️ ATTENDANCE\n\n" + error}
-            office = _nearest_office(cur, latitude, longitude, action)
+            office = _nearest_office(
+                cur, latitude, longitude, action,
+                str(staff.get("attendance_office_scope") or "ALL"),
+            )
             allowed = int(office.get("allowed_radius_meters") or 300)
             distance = float(office["distance_meters"])
             if distance > allowed:
