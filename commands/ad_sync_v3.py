@@ -49,6 +49,8 @@ async def synccasesv3(
         f"{result['clients_updated']}\n"
         f"📱 Mobiles imported: "
         f"{result['mobiles_imported']}\n"
+        f"⚠️ Mobile conflicts retained for review: "
+        f"{result.get('mobile_conflicts', 0)}\n"
         f"✉️ Emails imported: "
         f"{result['emails_imported']}\n"
         f"📍 Addresses imported: "
@@ -86,6 +88,7 @@ async def daily_ad_sync_v3_job(
             f"cases={result['cases_fetched']}, "
             f"clients={result['clients_fetched']}, "
             f"mobiles={result['mobiles_imported']}, "
+            f"mobile_conflicts={result.get('mobile_conflicts', 0)}, "
             f"repaired={result['cases_repaired']}"
         )
 
