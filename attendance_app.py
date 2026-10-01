@@ -32,6 +32,10 @@ from services.whatsapp_staff_companion import (
     staff_companion_enabled,
 )
 from services.whatsapp_owner_companion import handle_owner_inbound
+from services.whatsapp_client_reception import (
+    client_reception_enabled,
+    handle_client_inbound,
+)
 
 
 attendance_app = Flask(
@@ -49,7 +53,7 @@ def attendance_root():
 
 
 def _notify_whatsapp_inbound(item):
-    destination = OFFICE_GROUP_CHAT_ID or ADMIN_CHAT_ID
+    destination = admin_activity_chat_id()
     if not BOT_TOKEN or not destination:
         return
     text = (
@@ -58,6 +62,34 @@ def _notify_whatsapp_inbound(item):
         f"📱 +{item.get('phone') or '-'}\n"
         f"🔢 Case: {item.get('case_id') or 'Not matched'}\n"
         f"💬 {item.get('text') or '-'}\n\n"
+        "Open /whatsappinbox in the bot to review."
+    )
+    response = requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json={"chat_id": destination, "text": text}, timeout=15,
+    )
+    response.raise_for_status()
+
+
+def _notify_whatsapp_client(item, result):
+    """Send every client reception event to Ajay's private Telegram chat."""
+    destination = admin_activity_chat_id()
+    if not BOT_TOKEN or not destination:
+        return
+    event = str(result.get("owner_event") or "MESSAGE").replace("_", " ").title()
+    request_ref = (
+        f"\n🧾 Reference: WR-{result['request_id']}"
+        if result.get("request_id") else ""
+    )
+    case_ref = result.get("case_id") or item.get("case_id") or "Not matched"
+    text = (
+        "📨 WHATSAPP CLIENT RECEPTION\n\n"
+        f"👤 {item.get('name') or 'Unknown contact'}\n"
+        f"📱 +{item.get('phone') or '-'}\n"
+        f"🧩 Action: {event}\n"
+        f"🔢 Case: {case_ref}\n"
+        f"💬 {item.get('text') or '-'}"
+        f"{request_ref}\n\n"
         "Open /whatsappinbox in the bot to review."
     )
     response = requests.post(
@@ -213,7 +245,28 @@ def _process_whatsapp_inbound(item):
                         "WhatsApp morning check-in catch-up failed"
                     )
         else:
-            _notify_whatsapp_inbound(item)
+            client = (
+                handle_client_inbound(item)
+                if client_reception_enabled()
+                else {"is_client": False}
+            )
+            if client.get("is_client"):
+                if client.get("list_rows"):
+                    send_whatsapp_list(
+                        client["phone"], client["reply"],
+                        client.get("list_button") or "Choose option",
+                        client["list_rows"],
+                        section_title=client.get("list_section") or "Client Services",
+                    )
+                elif client.get("buttons"):
+                    send_whatsapp_buttons(
+                        client["phone"], client["reply"], client["buttons"],
+                    )
+                else:
+                    send_whatsapp_text(client["phone"], client["reply"])
+                _notify_whatsapp_client(item, client)
+            else:
+                _notify_whatsapp_inbound(item)
     except Exception:
         attendance_app.logger.exception("WhatsApp companion processing failed")
 
