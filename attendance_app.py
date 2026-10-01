@@ -326,7 +326,9 @@ def send_attendance_notification(text):
         )
 
 
-def get_nearest_allowed_office(cur, latitude, longitude, action):
+def get_nearest_allowed_office(
+    cur, latitude, longitude, action, office_scope="ALL"
+):
     if action == "CHECKIN":
         permission_column = "allow_checkin"
 
@@ -336,6 +338,13 @@ def get_nearest_allowed_office(cur, latitude, longitude, action):
     else:
         # MOVE is permitted to any active attendance office.
         permission_column = None
+
+    scope_office = {
+        "COURT_ONLY": "Court Chamber Office",
+        "EVENING_ONLY": "Evening Office",
+    }.get(str(office_scope or "ALL").upper())
+    scope_sql = " AND LOWER(office_name)=LOWER(%s)" if scope_office else ""
+    params = (scope_office,) if scope_office else ()
 
     if permission_column:
         cur.execute(f"""
@@ -348,11 +357,12 @@ def get_nearest_allowed_office(cur, latitude, longitude, action):
             FROM attendance_offices
             WHERE is_active = TRUE
               AND {permission_column} = TRUE
+              {scope_sql}
             ORDER BY id ASC
-        """)
+        """, params)
 
     else:
-        cur.execute("""
+        cur.execute(f"""
             SELECT
                 id,
                 office_name,
@@ -361,8 +371,9 @@ def get_nearest_allowed_office(cur, latitude, longitude, action):
                 allowed_radius_meters
             FROM attendance_offices
             WHERE is_active = TRUE
+              {scope_sql}
             ORDER BY id ASC
-        """)
+        """, params)
     offices = cur.fetchall()
     print("\n===== OFFICES FROM DATABASE =====")
 
@@ -559,7 +570,8 @@ def attendance_api():
             SELECT
                 staff_name,
                 ad_email,
-                ad_password
+                ad_password,
+                COALESCE(attendance_office_scope,'ALL')
             FROM staff_accounts
             WHERE telegram_user_id = %s
               AND is_active = TRUE
@@ -576,13 +588,14 @@ def attendance_api():
                 "message": "Staff account is not linked."
             }), 403
 
-        staff_name, ad_email, ad_password = staff
+        staff_name, ad_email, ad_password, office_scope = staff
 
         office = get_nearest_allowed_office(
             cur,
             latitude,
             longitude,
-            action
+            action,
+            office_scope
         )
 
         if office["distance_meters"] > office["allowed_radius_meters"]:

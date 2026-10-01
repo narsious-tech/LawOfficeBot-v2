@@ -16,6 +16,7 @@ from commands.attendance import (
     linkstaff,
     linkedstaff,
     delinkstaff,
+    setstaffprofile,
     teststafflogin,
     monitor_attendance_job
 )
@@ -382,6 +383,8 @@ CREATE TABLE IF NOT EXISTS staff_accounts (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
+cur.execute("ALTER TABLE staff_accounts ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'staff'")
+cur.execute("ALTER TABLE staff_accounts ADD COLUMN IF NOT EXISTS attendance_office_scope TEXT DEFAULT 'ALL'")
 conn.commit()
 staff_data = [
     ("Preet", "Office Manager / Law Student"),
@@ -3708,6 +3711,7 @@ app.add_handler(
 app.add_handler(CommandHandler("linkstaff", linkstaff))
 app.add_handler(CommandHandler("linkedstaff", linkedstaff))
 app.add_handler(CommandHandler("delinkstaff", delinkstaff))
+app.add_handler(CommandHandler("setstaffprofile", setstaffprofile))
 app.add_handler(CommandHandler("checkin", checkin))
 app.add_handler(CommandHandler("checkout", checkout))
 app.add_handler(CommandHandler("testweb", test_web))
