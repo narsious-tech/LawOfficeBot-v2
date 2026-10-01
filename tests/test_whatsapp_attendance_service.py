@@ -20,12 +20,34 @@ sys.modules["config"] = config
 from services.whatsapp_attendance_service import (  # noqa: E402
     _distance_meters,
     _fresh_timestamp,
+    _nearest_office,
     build_attendance_notification,
     review_attendance_location,
 )
 
 
 class WhatsAppAttendanceTests(unittest.TestCase):
+    def test_court_only_scope_filters_the_office_query(self):
+        class Cursor:
+            params = None
+
+            def execute(self, _query, params=()):
+                self.params = params
+
+            def fetchall(self):
+                return [{
+                    "id": 1, "office_name": "Court Chamber Office",
+                    "latitude": 30.8999, "longitude": 75.8346,
+                    "allowed_radius_meters": 300,
+                }]
+
+        cur = Cursor()
+        office = _nearest_office(
+            cur, 30.8999, 75.8346, "CHECKIN", "COURT_ONLY"
+        )
+        self.assertEqual(cur.params, ("Court Chamber Office",))
+        self.assertEqual(office["office_name"], "Court Chamber Office")
+
     def test_same_coordinates_have_zero_distance(self):
         self.assertLess(_distance_meters(30.8999606, 75.8346954, 30.8999606, 75.8346954), 0.1)
 
