@@ -199,6 +199,7 @@ from commands.mobile_audit import (
 from commands.finance_ledger import register_ledger_handlers
 from commands.loan_ledger import register_loan_ledger_handlers, loan_interest_reminder_job
 from commands.whatsapp_admin import register_whatsapp_handlers, whatsapp_retry_job
+from commands.whatsapp_clients import register_whatsapp_client_registry_handlers
 from commands.command_centre import register_command_centre
 from commands.access_control import register_access_control
 from commands.staff_activity import register_staff_activity_handlers
@@ -4078,6 +4079,7 @@ register_loan_ledger_handlers(app)
 
 # WhatsApp Cloud API transport, inbox and diagnostics
 register_whatsapp_handlers(app)
+register_whatsapp_client_registry_handlers(app)
 
 # Administrator-only eCourts backup reconciliation
 register_ecourts_handlers(app)
@@ -4214,13 +4216,13 @@ app.job_queue.run_daily(
 
 
 app.job_queue.run_daily(
-    daily_ad_case_sync_job,
+    daily_ad_sync_v3_job,
     time=time(
         hour=8,
         minute=45,
         tzinfo=ZoneInfo("Asia/Kolkata")
     ),
-    name="daily_ad_case_sync_845am"
+    name="daily_ad_mobile_sync_v3_845am"
 )
 
 app.job_queue.run_daily(
