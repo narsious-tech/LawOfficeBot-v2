@@ -34,6 +34,11 @@ from services.whatsapp_morning_delivery_service import (
     automatic_morning_enabled,
     configured_morning_time,
 )
+from services.whatsapp_client_reception import (
+    client_reception_enabled,
+    client_reception_status,
+    ensure_client_reception_schema,
+)
 
 
 def _admin(user_id: int | None) -> bool:
@@ -82,6 +87,7 @@ async def whatsappstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Linked staff numbers: {len(staff_links)}\n\n"
         f"Automatic morning: {'✅ Enabled' if automatic_morning_enabled() else '⚠️ Disabled'}\n"
         f"Morning delivery time: {morning_time.strftime('%I:%M %p')} IST\n"
+        f"Client reception: {'✅ Enabled' if client_reception_enabled() else '⚠️ Disabled'}\n"
         "Paid template fallback: No\n\n"
         f"Webhook URL:\n<code>{html.escape(webhook)}</code>\n\n"
         "Manual wa.me sending remains available as a fallback.",
@@ -279,9 +285,30 @@ async def testwhatsappmorning(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 
+async def whatsappclientstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _authorize(update):
+        return
+    try:
+        status = await asyncio.to_thread(client_reception_status)
+        await update.effective_message.reply_text(
+            "🛎 WHATSAPP CLIENT RECEPTION\n\n"
+            f"Status: {'✅ Enabled' if status.get('enabled') else '⚠️ Disabled'}\n"
+            f"New requests: {int(status.get('new_requests') or 0)}\n"
+            f"Requests in last 24 hours: {int(status.get('requests_24h') or 0)}\n"
+            "Paid template fallback: No\n\n"
+            "Unknown numbers receive only the public reception menu. "
+            "Case information requires a registered client phone number."
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(
+            f"❌ Client reception status failed:\n{type(exc).__name__}: {exc}"
+        )
+
+
 def register_whatsapp_handlers(app) -> None:
     ensure_whatsapp_schema()
     ensure_whatsapp_staff_schema()
+    ensure_client_reception_schema()
     app.add_handler(CommandHandler("whatsappstatus", whatsappstatus), group=-8)
     app.add_handler(CommandHandler("linkwhatsappowner", linkwhatsappowner), group=-8)
     app.add_handler(CommandHandler("whatsappowner", whatsappowner), group=-8)
@@ -295,6 +322,7 @@ def register_whatsapp_handlers(app) -> None:
     app.add_handler(
         CommandHandler("testwhatsappmorning", testwhatsappmorning), group=-8
     )
+    app.add_handler(CommandHandler("whatsappclientstatus", whatsappclientstatus), group=-8)
 
 
 async def whatsapp_retry_job(context: ContextTypes.DEFAULT_TYPE):
