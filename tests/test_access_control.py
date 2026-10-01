@@ -25,13 +25,14 @@ class AccessPolicyTests(unittest.TestCase):
     def test_external_sync_and_diagnostics_are_admin_only(self):
         for command in (
             "/synccases", "/synctimeline", "/ecourts", "/testweb",
-            "/debugcasejson",
+            "/debugcasejson", "/whatsappclients",
         ):
             self.assertEqual(required_level_for_command(command), "admin")
 
     def test_sensitive_callbacks_are_gated(self):
         self.assertEqual(required_level_for_callback("ecr:sync"), "admin")
         self.assertEqual(required_level_for_callback("ejg:review:1"), "admin")
+        self.assertEqual(required_level_for_callback("wac:v:token:1"), "admin")
         self.assertEqual(required_level_for_callback("los:status"), "supervisor")
         self.assertEqual(required_level_for_callback("comm:api:4"), "supervisor")
         self.assertEqual(required_level_for_callback("s13:works:all"), "supervisor")
