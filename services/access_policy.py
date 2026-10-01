@@ -51,7 +51,7 @@ ADMIN_COMMANDS = {
     "testemailalerts", "emailalertstatus", "testforgotcheckout",
     "testattendancesummary", "testloanreminders", "explore",
     "activitystatus", "activityfeed",
-    "setstaffprofile", "testwhatsappmorning",
+    "setstaffprofile", "testwhatsappmorning", "whatsappclientstatus",
 }
 
 ADMIN_CALLBACK_PREFIXES = ("ecr:", "ejg:", "loan:", "ajayai:")
