@@ -58,11 +58,14 @@ class WhatsAppClientReceptionTests(unittest.TestCase):
             else:
                 os.environ["WHATSAPP_CLIENT_RECEPTION_ENABLED"] = previous
 
-    def test_menu_has_all_seven_public_services(self):
+    def test_menu_has_public_services_and_reminder_consent(self):
         rows = reception_menu_rows()
-        self.assertEqual(len(rows), 7)
+        self.assertEqual(len(rows), 9)
         self.assertEqual(rows[0]["id"], "client_existing")
-        self.assertEqual(rows[-1]["id"], "client_contact")
+        self.assertEqual(rows[-1]["id"], "client_reminders_off")
+        ids = {row["id"] for row in rows}
+        self.assertIn("client_contact", ids)
+        self.assertIn("client_reminders_on", ids)
 
     def test_menu_disclaims_automated_legal_advice(self):
         message = reception_menu()
@@ -78,6 +81,14 @@ class WhatsAppClientReceptionTests(unittest.TestCase):
         self.assertEqual(
             classify_client_command("ignored", "client_case:42"),
             ("CASE_SELECTED", "42"),
+        )
+        self.assertEqual(
+            classify_client_command("ignored", "client_reminders_on"),
+            ("REMINDERS_ON", ""),
+        )
+        self.assertEqual(
+            classify_client_command("STOP REMINDERS"),
+            ("REMINDERS_OFF", ""),
         )
         self.assertEqual(
             classify_client_command("Need advice about property"),
