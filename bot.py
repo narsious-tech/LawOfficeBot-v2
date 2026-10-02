@@ -200,6 +200,11 @@ from commands.finance_ledger import register_ledger_handlers
 from commands.loan_ledger import register_loan_ledger_handlers, loan_interest_reminder_job
 from commands.whatsapp_admin import register_whatsapp_handlers, whatsapp_retry_job
 from commands.whatsapp_clients import register_whatsapp_client_registry_handlers
+from commands.whatsapp_case_notifications import (
+    advocate_diaries_status_poll_job,
+    register_whatsapp_case_notification_handlers,
+    whatsapp_case_notification_job,
+)
 from commands.command_centre import register_command_centre
 from commands.access_control import register_access_control
 from commands.staff_activity import register_staff_activity_handlers
@@ -4080,6 +4085,7 @@ register_loan_ledger_handlers(app)
 # WhatsApp Cloud API transport, inbox and diagnostics
 register_whatsapp_handlers(app)
 register_whatsapp_client_registry_handlers(app)
+register_whatsapp_case_notification_handlers(app)
 
 # Administrator-only eCourts backup reconciliation
 register_ecourts_handlers(app)
@@ -4092,6 +4098,19 @@ app.job_queue.run_repeating(
     interval=600,
     first=90,
     name="whatsapp_cloud_retry_queue",
+)
+
+app.job_queue.run_repeating(
+    advocate_diaries_status_poll_job,
+    interval=max(1800, int(os.getenv("ADVOCATE_DIARIES_STATUS_POLL_MINUTES", "60")) * 60),
+    first=600,
+    name="advocate_diaries_lightweight_status_poll",
+)
+
+app.job_queue.run_daily(
+    whatsapp_case_notification_job,
+    time=time(hour=9, minute=0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="whatsapp_client_case_notifications_900am",
 )
 
 app.job_queue.run_repeating(
