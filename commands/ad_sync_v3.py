@@ -24,10 +24,6 @@ async def synccasesv3(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-    notification_warning = (
-        f"Notification scan warning: {notification_result['scan_error']}\n\n"
-        if notification_result.get("scan_error") else ""
-    )
     await update.effective_message.reply_text(
         "⏳ Running Advocate Diaries Sync v3...\n\n"
         "Cases and unique clients will be synchronized. "
@@ -48,6 +44,10 @@ async def synccasesv3(
         )
         return
 
+    notification_warning = (
+        f"Notification scan warning: {notification_result['scan_error']}\n\n"
+        if notification_result.get("scan_error") else ""
+    )
     await update.effective_message.reply_text(
         "✅ ADVOCATE DIARIES SYNC v3 COMPLETED\n\n"
 
