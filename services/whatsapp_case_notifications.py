@@ -195,7 +195,10 @@ def _case_rows(cur) -> list[dict[str, Any]]:
     """)
     rows = [dict(row) for row in cur.fetchall()]
     cur.execute("SELECT phone_number,consent_status FROM whatsapp_client_consent")
-    consent_by_phone = {str(row[0]): str(row[1]).upper() for row in cur.fetchall()}
+    consent_by_phone = {
+        str(row['phone_number']): str(row['consent_status']).upper()
+        for row in cur.fetchall()
+    }
     for row in rows:
         try:
             row["phone_number"] = normalize_phone(str(row.get("phone_number") or ""))
@@ -221,13 +224,13 @@ def _event_key(kind: str, row: dict[str, Any], detail: str) -> str:
 
 def _month_spend(cur) -> Decimal:
     cur.execute("""
-        SELECT COALESCE(SUM(estimated_cost_inr),0)
+        SELECT COALESCE(SUM(estimated_cost_inr),0) AS month_spend
         FROM whatsapp_case_notification_ledger
         WHERE delivery_status IN ('PENDING','SENT_API','SENT','DELIVERED','READ')
           AND (created_at AT TIME ZONE 'Asia/Kolkata') >=
               DATE_TRUNC('month',NOW() AT TIME ZONE 'Asia/Kolkata')
     """)
-    return Decimal(str(cur.fetchone()[0] or 0))
+    return Decimal(str(cur.fetchone()['month_spend'] or 0))
 
 
 def _claim_event(
@@ -251,7 +254,7 @@ def _claim_event(
         event_type, hearing, template, body[:1024], rate,
     ))
     result = cur.fetchone()
-    return int(result[0]) if result else None
+    return int(result['id']) if result else None
 
 
 def _send_event(
