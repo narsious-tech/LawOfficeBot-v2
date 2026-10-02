@@ -55,6 +55,26 @@ def normalize_mobile(value: Any) -> str:
     return ""
 
 
+def mobile_sync_decision(
+    existing_mobile: Any,
+    existing_whatsapp: Any,
+    incoming_mobile: Any,
+) -> Tuple[str, str]:
+    """Return a conflict-safe AD mobile action and the number to retain locally."""
+    existing = (
+        normalize_mobile(existing_whatsapp)
+        or normalize_mobile(existing_mobile)
+    )
+    incoming = normalize_mobile(incoming_mobile)
+    if not incoming:
+        return "NO_AD_MOBILE", existing
+    if not existing:
+        return "IMPORTED", incoming
+    if existing == incoming:
+        return "UNCHANGED", existing
+    return "CONFLICT", existing
+
+
 def first_nonblank(
     mapping: Dict[str, Any],
     keys: Iterable[str]
@@ -380,11 +400,22 @@ def parse_client_payload(
     payload: Dict[str, Any]
 ) -> Dict[str, Any]:
     primary_phone = normalize_mobile(
-        payload.get("primary_phone")
+        deep_first_nonblank(
+            payload,
+            (
+                "primary_phone", "mobile", "mobile_no", "mobile_number",
+                "client_mobile", "client_mobile_no", "client_mobile_number",
+                "phone", "phone_no", "phone_number", "whatsapp",
+                "whatsapp_no", "whatsapp_number",
+            ),
+        )
     )
 
     other_phone = normalize_mobile(
-        payload.get("other_phone")
+        deep_first_nonblank(
+            payload,
+            ("other_phone", "alternate_phone", "alternate_mobile", "secondary_phone"),
+        )
     )
 
     primary_email = clean_text(
@@ -610,6 +641,30 @@ def ensure_schema(cur):
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS client_mobile_sync_audit (
+            id BIGSERIAL PRIMARY KEY,
+            client_id INTEGER,
+            ad_client_id TEXT,
+            client_name TEXT,
+            existing_mobile TEXT,
+            advocate_diaries_mobile TEXT,
+            action TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS client_mobile_sync_conflict_uidx
+        ON client_mobile_sync_audit(
+            COALESCE(ad_client_id,''),
+            COALESCE(existing_mobile,''),
+            COALESCE(advocate_diaries_mobile,''),
+            action
+        )
+        WHERE action='CONFLICT'
+    """)
+
 
 def find_client_id(
     cur,
@@ -706,6 +761,7 @@ def upsert_client(
         "clients_created": 0,
         "clients_updated": 0,
         "mobiles_imported": 0,
+        "mobile_conflicts": 0,
         "emails_imported": 0,
         "addresses_imported": 0,
     }
@@ -719,6 +775,7 @@ def upsert_client(
         cur.execute("""
             SELECT
                 mobile,
+                whatsapp_number,
                 email,
                 address
             FROM clients
@@ -727,18 +784,38 @@ def upsert_client(
             existing_id,
         ))
 
-        old_mobile, old_email, old_address = (
+        old_mobile, old_whatsapp, old_email, old_address = (
             cur.fetchone()
-            or (None, None, None)
+            or (None, None, None, None)
         )
 
-        if (
-            not clean_text(old_mobile)
-            and client.get("mobile")
-        ):
+        mobile_action, retained_mobile = mobile_sync_decision(
+            old_mobile,
+            old_whatsapp,
+            client.get("mobile"),
+        )
+        client["_effective_mobile"] = retained_mobile
+
+        if mobile_action == "IMPORTED":
             stats[
                 "mobiles_imported"
             ] += 1
+
+        if mobile_action == "CONFLICT":
+            stats["mobile_conflicts"] += 1
+            cur.execute("""
+                INSERT INTO client_mobile_sync_audit (
+                    client_id,ad_client_id,client_name,existing_mobile,
+                    advocate_diaries_mobile,action
+                ) VALUES (%s,%s,%s,%s,%s,'CONFLICT')
+                ON CONFLICT DO NOTHING
+            """, (
+                existing_id,
+                client.get("ad_client_id"),
+                client.get("client_name"),
+                retained_mobile,
+                client.get("mobile"),
+            ))
 
         if (
             not clean_text(old_email)
@@ -769,16 +846,17 @@ def upsert_client(
                     client_name
                 ),
 
-                mobile = COALESCE(
-                    NULLIF(%s, ''),
-                    mobile
-                ),
+                mobile = CASE
+                    WHEN TRIM(COALESCE(mobile,''))=''
+                    THEN COALESCE(NULLIF(%s,''),mobile)
+                    ELSE mobile
+                END,
 
-                whatsapp_number = COALESCE(
-                    NULLIF(%s, ''),
-                    whatsapp_number,
-                    mobile
-                ),
+                whatsapp_number = CASE
+                    WHEN TRIM(COALESCE(whatsapp_number,''))=''
+                    THEN COALESCE(NULLIF(%s,''),whatsapp_number,mobile)
+                    ELSE whatsapp_number
+                END,
 
                 other_phone = COALESCE(
                     NULLIF(%s, ''),
@@ -844,8 +922,8 @@ def upsert_client(
         """, (
             client.get("ad_client_id"),
             client.get("client_name"),
-            client.get("mobile"),
-            client.get("mobile"),
+            retained_mobile,
+            retained_mobile,
             client.get("other_phone"),
             client.get("email"),
             client.get("other_email"),
@@ -936,6 +1014,8 @@ def upsert_client(
         stats[
             "mobiles_imported"
         ] += 1
+
+    client["_effective_mobile"] = client.get("mobile") or ""
 
     if client.get("email"):
         stats[
@@ -1073,9 +1153,7 @@ def upsert_case(
         )
         folder_created = True
 
-    mobile = client.get(
-        "mobile"
-    )
+    mobile = client.get("_effective_mobile", client.get("mobile"))
 
     if existing_id:
         cur.execute("""
@@ -1114,8 +1192,8 @@ def upsert_case(
                 ),
 
                 mobile = COALESCE(
-                    NULLIF(%s, ''),
-                    mobile
+                    NULLIF(TRIM(mobile), ''),
+                    NULLIF(%s, '')
                 ),
 
                 case_type = COALESCE(
@@ -1388,6 +1466,7 @@ def run_sync_v3() -> Dict[str, int]:
         "clients_created": 0,
         "clients_updated": 0,
         "mobiles_imported": 0,
+        "mobile_conflicts": 0,
         "emails_imported": 0,
         "addresses_imported": 0,
         "cases_added": 0,
@@ -1560,6 +1639,54 @@ def run_sync_v3() -> Dict[str, int]:
         conn.rollback()
         raise
 
+    finally:
+        cur.close()
+        conn.close()
+
+
+def run_case_status_sync() -> Dict[str, int]:
+    """Lightweight AD poll for fields that can trigger client case notices.
+
+    This intentionally skips client-detail calls and Drive folder work. New cases
+    remain the responsibility of the full v3 sync; existing mirrored cases receive
+    only their current next date, status and purpose.
+    """
+    access_token = login()
+    parsed_cases = [parse_case_payload(item) for item in fetch_all_cases(access_token)]
+    stats = {"cases_fetched": len(parsed_cases), "cases_updated": 0, "cases_unmatched": 0}
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    try:
+        ensure_schema(cur)
+        for case in parsed_cases:
+            ad_case_id = case.get("ad_case_id")
+            case_number = case.get("case_number")
+            if not ad_case_id and not case_number:
+                stats["cases_unmatched"] += 1
+                continue
+            cur.execute("""
+                UPDATE cases
+                SET next_hearing=COALESCE(NULLIF(%s,''),next_hearing),
+                    status=COALESCE(NULLIF(%s,''),status),
+                    notes=COALESCE(NULLIF(%s,''),notes),
+                    ad_sync_status='MIRRORED',
+                    ad_sync_message='Updated by lightweight Advocate Diaries status poll'
+                WHERE (%s IS NOT NULL AND ad_case_id=%s)
+                   OR (%s <> '' AND LOWER(TRIM(COALESCE(case_number,case_id,'')))=
+                                      LOWER(TRIM(%s)))
+            """, (
+                case.get("next_hearing"), case.get("status"), case.get("purpose"),
+                ad_case_id, ad_case_id, case_number or "", case_number or "",
+            ))
+            if cur.rowcount:
+                stats["cases_updated"] += cur.rowcount
+            else:
+                stats["cases_unmatched"] += 1
+        conn.commit()
+        return stats
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         cur.close()
         conn.close()

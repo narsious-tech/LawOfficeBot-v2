@@ -481,6 +481,16 @@ def process_webhook(payload: dict[str, Any]) -> list[dict[str, Any]]:
                             + " WHERE provider_message_id=%s",
                             tuple(params),
                         )
+                        cur.execute("""
+                            UPDATE whatsapp_case_notification_ledger
+                            SET delivery_status=%s,
+                                provider_error=CASE WHEN %s='FAILED' THEN %s ELSE provider_error END,
+                                updated_at=NOW()
+                            WHERE provider_message_id=%s
+                        """, (
+                            state, state,
+                            json.dumps(status.get("errors") or [])[:1000], provider_id,
+                        ))
                     for message in value.get("messages") or []:
                         provider_id = message.get("id")
                         phone = normalize_phone(message.get("from") or "")

@@ -73,6 +73,8 @@ def reception_menu_rows() -> list[dict[str, str]]:
         {"id": "client_documents", "title": "Documents Required", "description": "Ask the office for a checklist"},
         {"id": "client_location", "title": "Location & Timings", "description": "Court and evening office"},
         {"id": "client_contact", "title": "Contact the Office", "description": "Phone, email and assistance"},
+        {"id": "client_reminders_on", "title": "Enable Reminders", "description": "Opt in to case WhatsApp notices"},
+        {"id": "client_reminders_off", "title": "Stop Reminders", "description": "Opt out of case WhatsApp notices"},
     ]
 
 
@@ -98,6 +100,8 @@ def classify_client_command(text: str, action_id: str | None = None) -> tuple[st
         "client_documents": "DOCUMENTS",
         "client_location": "LOCATION",
         "client_contact": "CONTACT",
+        "client_reminders_on": "REMINDERS_ON",
+        "client_reminders_off": "REMINDERS_OFF",
         "client_menu": "MENU",
         "client_cancel": "CANCEL",
     }
@@ -121,6 +125,10 @@ def classify_client_command(text: str, action_id: str | None = None) -> tuple[st
         return "LOCATION", ""
     if upper in {"CONTACT", "CONTACT OFFICE", "CONTACT THE OFFICE"}:
         return "CONTACT", ""
+    if upper in {"ENABLE REMINDERS", "START REMINDERS", "REMINDERS ON"}:
+        return "REMINDERS_ON", ""
+    if upper in {"STOP REMINDERS", "REMINDERS OFF", "OPT OUT"}:
+        return "REMINDERS_OFF", ""
     if upper in {"CANCEL", "STOP"}:
         return "CANCEL", ""
     return "MESSAGE", value
@@ -327,6 +335,39 @@ def handle_client_inbound(item: dict[str, Any]) -> dict[str, Any]:
                     "is_client": True, "phone": phone, "reply": reception_menu(),
                     "list_rows": reception_menu_rows(), "list_button": "Choose option",
                     "list_section": "Client Services", "owner_event": "MENU",
+                }
+
+            if command in {"REMINDERS_ON", "REMINDERS_OFF"}:
+                opted_in = command == "REMINDERS_ON"
+                cases = _registered_cases(cur, phone)
+                if opted_in and not cases:
+                    conn.commit()
+                    return {
+                        "is_client": True, "phone": phone,
+                        "reply": (
+                            "This number is not yet linked to a registered case, so automatic "
+                            "case reminders cannot be enabled. Please send your client name and "
+                            "case number to the office for verification."
+                        ),
+                        "owner_event": "REMINDER_CONSENT_DENIED", "registered": False,
+                    }
+                conn.commit()
+                from services.whatsapp_case_notifications import set_phone_consent
+
+                set_phone_consent(
+                    phone, opted_in, source="CLIENT_WHATSAPP_SELF_SERVICE"
+                )
+                return {
+                    "is_client": True, "phone": phone,
+                    "reply": (
+                        "✅ Case hearing reminders and material case updates are enabled for "
+                        "this WhatsApp number. Send STOP REMINDERS at any time to opt out."
+                        if opted_in else
+                        "✅ Automatic case reminders are now stopped for this WhatsApp number. "
+                        "You may send ENABLE REMINDERS later to opt in again."
+                    ),
+                    "owner_event": "REMINDER_OPT_IN" if opted_in else "REMINDER_OPT_OUT",
+                    "registered": bool(cases),
                 }
 
             if command in {"EXISTING", "CASE_STATUS"}:

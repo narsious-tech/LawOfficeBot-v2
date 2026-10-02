@@ -52,9 +52,11 @@ ADMIN_COMMANDS = {
     "testattendancesummary", "testloanreminders", "explore",
     "activitystatus", "activityfeed",
     "setstaffprofile", "testwhatsappmorning", "whatsappclientstatus",
+    "whatsappclients",
+    "whatsappreminderstatus", "testwhatsappreminders", "whatsappconsent",
 }
 
-ADMIN_CALLBACK_PREFIXES = ("ecr:", "ejg:", "loan:", "ajayai:")
+ADMIN_CALLBACK_PREFIXES = ("ecr:", "ejg:", "loan:", "ajayai:", "wac:")
 SUPERVISOR_CALLBACK_PREFIXES = (
     "comm:", "efs:", "s13:works:all", "s13:finance:", "s13:staff:"
 )
