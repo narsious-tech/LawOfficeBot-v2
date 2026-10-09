@@ -82,12 +82,19 @@ def _admin(user_id: int | None) -> bool:
     return bool(user_id is not None and int(user_id) in allowed)
 
 
-async def _authorize(update: Update) -> bool:
+async def _authorize(update: Update, date_only: bool = False) -> bool:
     if not update.effective_chat or update.effective_chat.type != ChatType.PRIVATE:
         await update.effective_message.reply_text(
-            "🔒 eCourts reconciliation is available only in Ajay’s private chat."
+            "🔒 Use the eCourts desk in your private bot chat."
         )
         return False
+    if date_only:
+        from services.ecourts_date_access import can_manage_ecourts_dates
+        try:
+            if await asyncio.to_thread(can_manage_ecourts_dates, update.effective_user.id):
+                return True
+        except Exception:
+            logger.exception("eCourts date delegation lookup failed")
     if not _admin(update.effective_user.id if update.effective_user else None):
         await update.effective_message.reply_text("⛔ eCourts administration access denied.")
         return False
@@ -189,11 +196,11 @@ def _date_conflict_keyboard(item: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(
             "⏳ Review Later", callback_data=f"ecr:datelater:{verification_id}"
         )],
-        [InlineKeyboardButton("⬅️ eCourts Dashboard", callback_data="ecr:home")],
+        [InlineKeyboardButton("🔄 Refresh Date Desk", callback_data="ecr:datecheck")],
     ])
 
 
-async def _send_date_conflict(message) -> None:
+async def _send_date_conflict(message, date_only: bool = False) -> None:
     items = await asyncio.to_thread(list_date_conflicts, 1, False)
     if not items:
         summary = await asyncio.to_thread(verification_summary)
@@ -204,7 +211,7 @@ async def _send_date_conflict(message) -> None:
             f"Awaiting eCourts: <b>{summary.get('awaiting_ecourts', 0)}</b>\n"
             f"Historical records ignored: <b>{summary.get('historical_stale', 0)}</b>",
             parse_mode=ParseMode.HTML,
-            reply_markup=_keyboard(),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Date Desk", callback_data="ecr:datecheck")]]) if date_only else _keyboard(),
         )
         return
     item = items[0]
@@ -216,11 +223,11 @@ async def _send_date_conflict(message) -> None:
 
 
 async def ecourtsdatecheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await _authorize(update):
+    if not await _authorize(update, date_only=True):
         return
     try:
         await asyncio.to_thread(reconcile_date_verifications, None)
-        await _send_date_conflict(update.effective_message)
+        await _send_date_conflict(update.effective_message, date_only=not _admin(update.effective_user.id))
     except Exception as exc:
         logger.exception("eCourts date verification failed")
         await update.effective_message.reply_text(
@@ -1036,15 +1043,15 @@ async def _alert_orders(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not await _authorize(update):
-        return
     parts = (query.data or "").split(":")
     action = parts[1] if len(parts) > 1 else "home"
+    if not await _authorize(update, date_only=action in {"datecheck", "dateaccept", "datekeep", "datelater"}):
+        return
     page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
     if action == "datecheck":
         try:
             await asyncio.to_thread(reconcile_date_verifications, None)
-            await _send_date_conflict(query.message)
+            await _send_date_conflict(query.message, date_only=not _admin(update.effective_user.id))
         except Exception as exc:
             logger.exception("eCourts date verification callback failed")
             await query.message.reply_text(
@@ -1094,7 +1101,7 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML,
             )
             if decision != "REVIEW_LATER":
-                await _send_date_conflict(query.message)
+                await _send_date_conflict(query.message, date_only=not _admin(update.effective_user.id))
         except Exception as exc:
             await query.message.reply_text(
                 f"❌ Date decision failed safely: {html.escape(str(exc))}",
@@ -1527,5 +1534,5 @@ def register_ecourts_handlers(app) -> None:
     app.add_handler(CommandHandler("ecourtsorders", ecourtsorders))
     app.add_handler(CommandHandler("syncecourtsorders", syncecourtsorders))
     app.add_handler(CommandHandler("ecourtswork", ecourtswork))
-    app.add_handler(CommandHandler("ecourtsdatecheck", ecourtsdatecheck))
+    app.add_handler(CommandHandler(["ecourtsdatecheck", "ecourtsdates"], ecourtsdatecheck))
     app.add_handler(CallbackQueryHandler(ecourts_callback, pattern=r"^ecr:"))

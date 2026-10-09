@@ -12,6 +12,8 @@ from telegram.ext import (
     filters,
 )
 
+from services.ecourts_date_access import can_manage_ecourts_dates, is_date_action
+
 from services.access_policy import (
     ROLE_RANK,
     AccessIdentity,
@@ -56,6 +58,12 @@ async def command_access_gate(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "office group."
             )
         raise ApplicationHandlerStop
+    if is_date_action(command=normalized) and update.effective_chat and update.effective_chat.type == "private":
+        try:
+            if await asyncio.to_thread(can_manage_ecourts_dates, update.effective_user.id):
+                return
+        except Exception:
+            pass
     required = required_level_for_command(command)
     identity = resolve_identity(
         update.effective_user.id if update.effective_user else None
@@ -70,6 +78,12 @@ async def callback_access_gate(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     if not query:
         return
+    if is_date_action(callback=query.data) and update.effective_chat and update.effective_chat.type == "private":
+        try:
+            if await asyncio.to_thread(can_manage_ecourts_dates, update.effective_user.id):
+                return
+        except Exception:
+            pass
     required = required_level_for_callback(query.data or "")
     identity = resolve_identity(
         update.effective_user.id if update.effective_user else None
