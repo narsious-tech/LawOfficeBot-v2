@@ -203,6 +203,11 @@ def _process_whatsapp_inbound(item):
             else {"is_staff": False}
         )
         if result.get("is_staff"):
+            try:
+                from services.staff_notification_delivery import flush_staff_notifications
+                flush_staff_notifications(result["phone"])
+            except Exception:
+                print("Pending staff notification delivery failed; retained for retry")
             if result.get("task_picker"):
                 send_whatsapp_list(
                     result["phone"], result["reply"], "Choose work",
