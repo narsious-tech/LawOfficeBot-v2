@@ -154,6 +154,17 @@ def whatsapp_webhook_receive():
 def _process_whatsapp_inbound(item):
     """Acknowledge Meta quickly, then process slow office services in background."""
     try:
+        if staff_companion_enabled():
+            from services.whatsapp_ecourts_dates import handle_date_inbound
+            date_result = handle_date_inbound(item)
+            if date_result is not None:
+                if date_result.get("buttons"):
+                    send_whatsapp_buttons(date_result["phone"], date_result["reply"], date_result["buttons"])
+                else:
+                    send_whatsapp_text(date_result["phone"], date_result["reply"])
+                if date_result.get("staff"):
+                    _notify_whatsapp_staff(date_result)
+                return
         owner = (
             handle_owner_inbound(item)
             if staff_companion_enabled()
