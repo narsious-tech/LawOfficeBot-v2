@@ -420,7 +420,11 @@ def list_date_conflicts(limit: int = 20, unalerted_only: bool = False) -> list[d
               AND (%s=FALSE OR alert_sent_at IS NULL)
             ORDER BY v.updated_at, v.id LIMIT %s
         """, (bool(unalerted_only), max(1, min(int(limit), 100))))
-        return [dict(row) for row in cur.fetchall()]
+        rows = [dict(row) for row in cur.fetchall()]
+        return [row for row in rows if classify_dates(
+            row.get("staff_next_date"), row.get("ecourts_next_date"),
+            row.get("staff_last_date"), row.get("ecourts_last_date"),
+        )[0] == "DATE_CONFLICT"]
     finally:
         cur.close()
         conn.close()
@@ -534,6 +538,13 @@ def review_date_conflict(
         item = dict(item)
         if item["verification_status"] != "DATE_CONFLICT":
             raise ValueError("This date conflict is no longer pending.")
+        if decision == "ACCEPT_ECOURTS":
+            fresh_status, fresh_message = classify_dates(
+                item.get("staff_next_date"), item.get("ecourts_next_date"),
+                item.get("staff_last_date"), item.get("ecourts_last_date"),
+            )
+            if fresh_status != "DATE_CONFLICT":
+                raise ValueError(f"eCourts date cannot be accepted: {fresh_message} Run a fresh backup sync first.")
         if decision == "REVIEW_LATER":
             cur.execute("""
                 UPDATE ecourts_date_verifications

@@ -2,6 +2,7 @@
 import re
 from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 def as_date(value: Any) -> date | None:
@@ -39,11 +40,17 @@ def classify_dates(
     remote_next = as_date(ecourts_next)
     local_last = as_date(staff_last)
     remote_last = as_date(ecourts_last)
-    reference_date = as_date(today) or date.today()
+    reference_date = as_date(today) or datetime.now(ZoneInfo("Asia/Kolkata")).date()
     if not local_next:
         return "NO_STAFF_DATE", "No operational staff date is recorded."
     if not remote_next:
         return "AWAITING_ECOURTS", "eCourts has not published a next date."
+    if local_next == remote_next:
+        return "VERIFIED", "Staff and eCourts dates agree."
+    if local_last and local_last >= reference_date:
+        return "AWAITING_ECOURTS", "Hearing took place today; recheck eCourts from the next day."
+    if remote_next <= reference_date < local_next:
+        return "AWAITING_ECOURTS", "eCourts still lists today or an earlier hearing; await its next-date update."
     if local_last and remote_last and remote_last < local_last:
         return "AWAITING_ECOURTS", "The eCourts record is older than the staff update."
     if remote_next < reference_date <= local_next:
