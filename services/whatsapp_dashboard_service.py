@@ -351,7 +351,7 @@ def review_file_selection(owner_phone: str) -> dict[str, Any]:
         lines.append(f"…and {len(selected) - 12} more.")
     lines.extend([
         "",
-        "Send only these files to Preet, Priya, Happy and Jimmy?",
+        "Send only these files to all active linked staff on WhatsApp?",
         "No paid template will be used.",
     ])
     return {
@@ -397,82 +397,14 @@ def deliver_selected_files(owner_phone: str, owner_id: int | None) -> str:
     save_file_assignments(target, cases, set(range(len(cases))), owner_id or 0, "Ajay Chawla")
     digest = hashlib.sha256("|".join(str(row["id"]) for row in selected).encode()).hexdigest()
     message = _selected_file_message(target, selected)
-    chunks = [message[start:start + 4000] for start in range(0, len(message), 4000)]
-    conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
-    sent, closed, missing, failed, duplicate = [], [], [], [], []
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            for name in FILE_RECIPIENTS:
-                cur.execute("""
-                    SELECT telegram_user_id,staff_name,whatsapp_phone
-                    FROM staff_accounts
-                    WHERE LOWER(TRIM(staff_name))=LOWER(TRIM(%s))
-                      AND COALESCE(is_active,TRUE)=TRUE
-                    LIMIT 1
-                """, (name,))
-                recipient = cur.fetchone()
-                if not recipient or not recipient.get("whatsapp_phone"):
-                    missing.append(name)
-                    continue
-                phone = normalize_phone(str(recipient["whatsapp_phone"]))
-                cur.execute("""
-                    SELECT delivery_status FROM whatsapp_file_delivery
-                    WHERE target_date=%s AND recipient_telegram_id=%s AND selection_hash=%s
-                """, (target, recipient["telegram_user_id"], digest))
-                prior = cur.fetchone()
-                if prior and prior.get("delivery_status") == "SENT":
-                    duplicate.append(name)
-                    continue
-                cur.execute("""
-                    SELECT 1 FROM whatsapp_inbound_messages
-                    WHERE sender_phone=%s AND received_at>=NOW()-INTERVAL '24 hours'
-                    LIMIT 1
-                """, (phone,))
-                if not cur.fetchone():
-                    closed.append(name)
-                    status, ids, error = "WINDOW_CLOSED", "", "No inbound staff message within 24 hours"
-                else:
-                    try:
-                        provider_ids = [send_text_message(phone, chunk)["provider_message_id"] for chunk in chunks]
-                        sent.append(name)
-                        status, ids, error = "SENT", ",".join(provider_ids), ""
-                    except Exception as exc:
-                        failed.append(name)
-                        status, ids, error = "FAILED", "", str(exc)[:1000]
-                cur.execute("""
-                    INSERT INTO whatsapp_file_delivery(
-                        target_date,recipient_telegram_id,recipient_name,
-                        recipient_phone,selection_hash,delivery_status,
-                        provider_message_ids,provider_error
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT(target_date,recipient_telegram_id,selection_hash)
-                    DO UPDATE SET delivery_status=EXCLUDED.delivery_status,
-                        provider_message_ids=EXCLUDED.provider_message_ids,
-                        provider_error=EXCLUDED.provider_error,created_at=NOW()
-                """, (
-                    target, recipient["telegram_user_id"], recipient["staff_name"],
-                    phone, digest, status, ids or None, error or None,
-                ))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-    lines = ["✅ PHYSICAL FILE DELIVERY RESULT", "", f"Selected files: {len(selected)}"]
-    lines.append(f"Sent: {', '.join(sent) if sent else 'None'}")
-    if duplicate:
-        lines.append(f"Already sent: {', '.join(duplicate)}")
-    if closed:
-        lines.extend([
-            f"24-hour window closed: {', '.join(closed)}",
-            "Ask them to send HI, then confirm the list again.",
-        ])
-    if missing:
-        lines.append(f"WhatsApp not linked: {', '.join(missing)}")
-    if failed:
-        lines.append(f"Failed: {', '.join(failed)}")
-    lines.append("\nNo paid template was sent.")
+    from services.staff_notification_delivery import deliver_staff_whatsapp, file_event_key
+    from datetime import timedelta
+    expires = datetime.combine(target + timedelta(days=1), datetime.min.time(), tzinfo=IST)
+    result = deliver_staff_whatsapp(message, file_event_key(target, message), expires_at=expires)
+    lines = ["📁 PHYSICAL FILE DELIVERY RESULT", f"Selected files: {len(selected)}"]
+    for key, label in (("sent", "Submitted"), ("queued", "Queued until next WhatsApp message"), ("missing", "WhatsApp not linked"), ("failed", "Failed")):
+        lines.append(f"{label}: {', '.join(result[key]) or 'None'}")
+    lines.append("No paid template was used.")
     return "\n".join(lines)[:4000]
 
 
