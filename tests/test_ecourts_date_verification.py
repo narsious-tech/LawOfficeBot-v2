@@ -65,6 +65,18 @@ class DateVerificationTests(unittest.TestCase):
             "DATE_CONFLICT",
         )
 
+    def test_today_ecourts_date_waits_for_update(self):
+        self.assertEqual(classify_dates("2026-11-30", "2026-10-09", today="2026-10-09")[0], "AWAITING_ECOURTS")
+
+    def test_same_day_hearing_defers_even_future_difference(self):
+        self.assertEqual(classify_dates("2026-11-30", "2026-11-15", staff_last="2026-10-09", today="2026-10-09")[0], "AWAITING_ECOURTS")
+
+    def test_next_day_fresh_future_difference_is_reviewable(self):
+        self.assertEqual(classify_dates("2026-11-30", "2026-11-15", staff_last="2026-10-09", today="2026-10-10")[0], "DATE_CONFLICT")
+
+    def test_next_day_still_stale_backup_is_not_a_conflict(self):
+        self.assertEqual(classify_dates("2026-11-30", "2026-10-09", staff_last="2026-10-09", today="2026-10-10")[0], "AWAITING_ECOURTS")
+
 
 if __name__ == "__main__":
     unittest.main()
