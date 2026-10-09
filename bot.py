@@ -4120,11 +4120,10 @@ app.job_queue.run_repeating(
     name="advocate_diaries_hearing_writeback_retry",
 )
 
-app.job_queue.run_repeating(
+app.job_queue.run_daily(
     ecourts_backup_sync_job,
-    interval=max(3600, int(os.getenv("ECOURTS_BACKUP_SYNC_HOURS", "6")) * 3600),
-    first=180,
-    name="ecourts_drive_backup_reconciliation",
+    time=time(hour=10, minute=5, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="ecourts_drive_backup_reconciliation_next_day_1005",
 )
 
 app.job_queue.run_repeating(
