@@ -47,6 +47,8 @@ from services.ecourts_date_verification_service import (
     verification_summary,
 )
 
+from services.staff_notification_delivery import notify_ecourts_staff
+
 logger = logging.getLogger(__name__)
 
 
@@ -241,6 +243,7 @@ async def syncecourts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await waiting.edit_text(
             _summary(data), parse_mode=ParseMode.HTML, reply_markup=_keyboard()
         )
+        await notify_ecourts_staff(context, _summary(data), "ecourts:" + str(data.get("sync_run_id") or data.get("id") or data))
         if data.get("change_count"):
             await update.effective_message.reply_text(
                 f"🔔 {int(data['change_count'])} eCourts field change(s) detected.\n"
@@ -978,6 +981,7 @@ async def _alert_changes(context: ContextTypes.DEFAULT_TYPE) -> None:
         "Open the paginated review desk to decide each case. "
         "Office OS and Advocate Diaries remain unchanged until approval."
     )
+    await notify_ecourts_staff(context, alert_text + "\n\n" + "\n\n".join(_group_change_text(item) for item in groups), "ecourts-changes:" + str([item.get("change_ids") for item in groups]))
     alert_keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("🛡 Review Case Updates", callback_data="ecr:review:1")
     ]])
@@ -1370,6 +1374,7 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⏳ Synchronizing both Drive backups…")
         try:
             data = await asyncio.to_thread(synchronize_backups, update.effective_user.id)
+            await notify_ecourts_staff(context, _summary(data), "ecourts:" + str(data.get("sync_run_id") or data.get("id") or data))
             await query.edit_message_text(
                 _summary(data), parse_mode=ParseMode.HTML, reply_markup=_keyboard()
             )
@@ -1434,7 +1439,8 @@ async def ecourts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ecourts_backup_sync_job(context: ContextTypes.DEFAULT_TYPE):
     try:
-        await asyncio.to_thread(synchronize_backups, None)
+        data = await asyncio.to_thread(synchronize_backups, None)
+        await notify_ecourts_staff(context, _summary(data), "ecourts:" + str(data.get("sync_run_id") or data.get("id") or data))
         await _alert_date_conflicts(context)
         await _alert_changes(context)
     except Exception:

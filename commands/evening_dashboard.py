@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import tempfile
-import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -50,29 +49,13 @@ def _safe(value, fallback="-"):
     return text or fallback
 
 
-def _clean_case_title(case):
-    """Return the Advocate Diaries case title without duplicating the case number."""
-    number = _safe(case.get("case_number"), "")
-    title = _safe(case.get("case_title"), "")
-    if not title:
-        return "Title not recorded"
-    if number:
-        title = re.sub(
-            rf"^\s*{re.escape(number)}\s*[-:|–—]?\s*",
-            "",
-            title,
-            flags=re.IGNORECASE,
-        ).strip()
-    return title or "Title not recorded"
-
-
 def _flatten_cases(groups):
     rows = []
     for group in groups:
         for case in group.get("cases") or []:
             rows.append({
                 "case_number": _safe(case.get("case_number"), "Case number not entered"),
-                "case_title": _clean_case_title(case),
+                "case_title": _safe(case.get("case_title"), "Title not recorded"),
                 "purpose": _safe(case.get("stage") or case.get("purpose"), "Purpose not recorded"),
                 "owner": _safe(case.get("owner_name") or case.get("owner"), "Not assigned"),
                 "court": _safe(group.get("court_name"), "Court not recorded"),
@@ -159,9 +142,8 @@ def _selection_keyboard(state, target, page=0):
     rows = []
     for idx in range(start, end):
         symbol = "✅" if idx in selected else "⬜"
-        case = cases[idx]
-        title = _safe(case.get("case_title"), case.get("case_number") or "Case")
-        label = f"{symbol} {idx + 1}. {title}"[:60]
+        number = cases[idx]["case_number"]
+        label = f"{symbol} {idx + 1}. {number}"[:55]
         rows.append([InlineKeyboardButton(label, callback_data=f"efs:{target.isoformat()}:t:{idx}:{page}")])
     nav = []
     if page > 0:
@@ -175,7 +157,7 @@ def _selection_keyboard(state, target, page=0):
         InlineKeyboardButton("☑ Select all", callback_data=f"efs:{target.isoformat()}:all:{page}"),
     ])
     rows.append([InlineKeyboardButton(
-        f"📤 Send {len(selected)} selected files (all pages)",
+        f"📤 Send {len(selected)} selected files",
         callback_data=f"efs:{target.isoformat()}:send:{page}",
     )])
     rows.append([InlineKeyboardButton("🧹 Clear selection", callback_data=f"efs:{target.isoformat()}:clear:{page}")])
@@ -340,9 +322,16 @@ async def evening_file_selection_callback(update: Update, context: ContextTypes.
             except Exception:
                 logger.exception("Could not send selected file list to %s", name)
                 missing.append(name)
+        from services.staff_notification_delivery import deliver_staff_whatsapp, file_event_key
+        from datetime import timedelta
+        expires = datetime.combine(target + timedelta(days=1), datetime.min.time(), tzinfo=IST)
+        wa_result = await asyncio.to_thread(deliver_staff_whatsapp, text, file_event_key(target, text), None, expires)
         confirmation = f"✅ Selected file list sent to: {', '.join(delivered) or 'nobody'}."
         if missing:
             confirmation += f"\n⚠️ Telegram account not linked/reachable: {', '.join(missing)}."
+        confirmation += "\nWhatsApp submitted: " + (', '.join(wa_result['sent']) or 'None')
+        confirmation += "\nWhatsApp queued until next message: " + (', '.join(wa_result['queued']) or 'None')
+        confirmation += "\nWhatsApp unlinked/failed: " + (', '.join(wa_result['missing'] + wa_result['failed']) or 'None')
         await context.bot.send_message(chat_id=query.message.chat.id, text=confirmation)
         await _safe_edit_selection(query, state, target, page)
         return
