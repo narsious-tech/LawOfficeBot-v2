@@ -119,6 +119,8 @@ async def notify_ecourts_staff(context, text, event_key):
                 if staff.get('telegram_user_id'):
                     for start in range(0, len(plain_text(text)), 3900):
                         await context.bot.send_message(chat_id=int(staff['telegram_user_id']), text=plain_text(text)[start:start+3900])
+                    if str(staff['staff_name']).strip().casefold() == 'priya':
+                        await context.bot.send_message(chat_id=int(staff['telegram_user_id']), text="Review dates with /ecourtsdatecheck in Telegram or send DATES on WhatsApp.")
             except Exception:
                 logger.exception('Private eCourts Telegram delivery failed for %s', staff['staff_name'])
         result = await asyncio.to_thread(deliver_staff_whatsapp, text, event_key, names)

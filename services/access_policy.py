@@ -42,7 +42,7 @@ ADMIN_COMMANDS = {
     "syncecourts", "ecourtsmissing", "ecourtsreport", "ecourtsapprove",
     "ecourtsinspect", "ecourtschanges", "ecourtsreview", "ecourtsmatches",
     "ecourtsops", "ecourtsorders", "syncecourtsorders", "ecourtswork",
-    "ecourtsdatecheck", "ejagriti", "ejagritilink", "ejagritiupdate",
+    "ecourtsdatecheck", "ecourtsdates", "ejagriti", "ejagritilink", "ejagritiupdate",
     "ejagritireview", "ejagritiorder", "debugcasejson", "inspectadcase",
     "inspectadclient", "testad", "testweb", "testcausejob",
     "testpendingsummary", "testcompletedsummary", "testdeadlinealert",

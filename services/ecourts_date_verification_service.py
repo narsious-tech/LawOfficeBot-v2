@@ -517,7 +517,7 @@ def _invalidate_old_operational_items(
 
 
 def review_date_conflict(
-    verification_id: int, decision: str, actor_id: int
+    verification_id: int, decision: str, actor_id: int, *, expected_snapshot: dict | None = None
 ) -> dict[str, Any]:
     """Apply an administrator decision and sync AD only when eCourts is accepted."""
     decision = str(decision or "").strip().upper()
@@ -536,6 +536,10 @@ def review_date_conflict(
         if not item:
             raise ValueError("Date verification record was not found.")
         item = dict(item)
+        if expected_snapshot is not None:
+            from services.ecourts_date_access import date_snapshot
+            if date_snapshot(item) != expected_snapshot:
+                raise ValueError("The date record changed since preview. Send DATES and review the fresh values.")
         if item["verification_status"] != "DATE_CONFLICT":
             raise ValueError("This date conflict is no longer pending.")
         if decision == "ACCEPT_ECOURTS":
