@@ -1,3 +1,4 @@
+import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 from bs4 import BeautifulSoup
@@ -126,8 +127,12 @@ async def works(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    from services.ad_work_case_repair import repair_work_case_details
+    repair_result = await asyncio.to_thread(repair_work_case_details, records)
     context.user_data["works_map"] = {}
     message = f"📋 WORKS - {status.upper()}\n\n"
+    if repair_result.get("updated"):
+        message += f"🔧 Case details restored for {repair_result['updated']} existing task(s).\n\n"
 
     if not records:
         await update.effective_message.reply_text(
@@ -148,11 +153,7 @@ async def works(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if assignment_error
             else assigned_to or "⚪ Not assigned"
         )
-        short_case = (
-            record.case_details.split("\n")[0]
-            if record.case_details
-            else record.case_title
-        )
+        short_case = record.case_title or "Case title not recorded"
         full_item = (
             f"📋 Work #{index}\n\n"
             f"👤 Client: {record.client}\n\n"
@@ -174,6 +175,7 @@ async def works(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += (
             f"{index}. 👤 {record.client}\n"
             f"⚖️ {short_case}\n"
+            f"🔢 {record.case_number or 'Case number not recorded'}\n"
             f"📝 {record.description}\n"
             f"👥 Assigned to: {assignment_label}\n\n"
         )
@@ -681,6 +683,8 @@ async def mytasks(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    from services.ad_work_case_repair import repair_work_case_details
+    await asyncio.to_thread(repair_work_case_details)
     telegram_user_id = update.effective_user.id
 
     conn = psycopg2.connect(DATABASE_URL)
@@ -844,6 +848,10 @@ async def mytasks(
             f"Task #{task_id}\n"
         )
 
+        if source_type == "advocate_diaries_work" and not case_title:
+            message += "⚖️ Case title unavailable in linked AD work\n"
+        if source_type == "advocate_diaries_work" and not case_number:
+            message += "🔢 Case number unavailable in linked AD work\n"
         if case_title:
             message += (
                 f"⚖️ {case_title}\n"

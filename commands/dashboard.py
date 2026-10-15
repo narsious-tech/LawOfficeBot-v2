@@ -1669,6 +1669,8 @@ async def morning_dashboard_job(context):
         )
 
 def build_staff_morning_briefs():
+    from services.ad_work_case_repair import repair_work_case_details
+    repair_work_case_details()
     now = datetime.now()
     today = now.date()
 
