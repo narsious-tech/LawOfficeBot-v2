@@ -143,7 +143,8 @@ def _selection_keyboard(state, target, page=0):
     for idx in range(start, end):
         symbol = "✅" if idx in selected else "⬜"
         number = cases[idx]["case_number"]
-        label = f"{symbol} {idx + 1}. {number}"[:55]
+        title = cases[idx].get("case_title") or "Title not recorded"
+        label = f"{symbol} {idx + 1}. {title[:45]} · {number}"[:100]
         rows.append([InlineKeyboardButton(label, callback_data=f"efs:{target.isoformat()}:t:{idx}:{page}")])
     nav = []
     if page > 0:
