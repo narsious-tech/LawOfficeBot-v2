@@ -33,8 +33,8 @@ def build_attendance_notification(
 ) -> str:
     """Build the Telegram office-group alert for a WhatsApp attendance punch."""
     action = str(action or "").upper()
-    label = "CHECK-IN" if action == "CHECKIN" else "CHECK-OUT"
-    icon = "🟢" if action == "CHECKIN" else "🔴"
+    label = {"CHECKIN": "CHECK-IN", "CHECKOUT": "CHECK-OUT", "MOVE": "OFFICE TRANSFER"}.get(action, action)
+    icon = {"CHECKIN": "🟢", "CHECKOUT": "🔴", "MOVE": "🔄"}.get(action, "📍")
     lines = [
         f"{icon} STAFF {label}",
         "",
@@ -75,7 +75,7 @@ def ensure_whatsapp_attendance_schema() -> None:
                     whatsapp_phone TEXT PRIMARY KEY,
                     telegram_user_id BIGINT NOT NULL,
                     staff_name TEXT NOT NULL,
-                    action TEXT NOT NULL CHECK (action IN ('CHECKIN','CHECKOUT')),
+                    action TEXT NOT NULL CHECK (action IN ('CHECKIN','CHECKOUT','MOVE')),
                     latitude DOUBLE PRECISION,
                     longitude DOUBLE PRECISION,
                     office_id INTEGER,
@@ -86,6 +86,18 @@ def ensure_whatsapp_attendance_schema() -> None:
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
+            cur.execute("""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_constraint
+                        WHERE conrelid='whatsapp_attendance_pending'::regclass
+                          AND conname='whatsapp_attendance_pending_action_check'
+                          AND pg_get_constraintdef(oid) NOT LIKE '%MOVE%') THEN
+                        ALTER TABLE whatsapp_attendance_pending DROP CONSTRAINT whatsapp_attendance_pending_action_check;
+                        ALTER TABLE whatsapp_attendance_pending ADD CONSTRAINT whatsapp_attendance_pending_action_check
+                          CHECK (action IN ('CHECKIN','CHECKOUT','MOVE'));
+                    END IF;
+                END $$
+            """)
         conn.commit()
     finally:
         conn.close()
@@ -94,10 +106,11 @@ def ensure_whatsapp_attendance_schema() -> None:
 def _session(cur, telegram_user_id: int, attendance_date) -> dict[str, Any] | None:
     cur.execute("""
         SELECT id,checkin_time,checkin_office_id,checkin_office_name,
-               checkout_time,checkout_office_id,checkout_office_name,status
+               checkout_time,checkout_office_id,checkout_office_name,status,
+               current_office_id,current_office_name
         FROM attendance_sessions
         WHERE telegram_user_id=%s AND attendance_date=%s
-        ORDER BY id DESC LIMIT 1
+        ORDER BY id DESC LIMIT 1 FOR UPDATE
     """, (telegram_user_id, attendance_date))
     row = cur.fetchone()
     return dict(row) if row else None
@@ -116,12 +129,15 @@ def _action_error(cur, telegram_user_id: int, action: str, now: datetime) -> str
             return "No check-in was found for today. Please check in first."
         if session.get("status") == "CLOSED" or session.get("checkout_time"):
             return "You have already checked out today."
+    if action == "MOVE":
+        if not session or session.get("status") != "OPEN" or session.get("checkout_time"):
+            return "Move In requires an open attendance session. Check in first; use Check In if you already checked out."
     return None
 
 
 def begin_attendance(phone: str, staff: dict[str, Any], action: str) -> str:
     action = str(action or "").upper()
-    if action not in {"CHECKIN", "CHECKOUT"}:
+    if action not in {"CHECKIN", "CHECKOUT", "MOVE"}:
         raise ValueError("Invalid attendance action.")
     ensure_whatsapp_attendance_schema()
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
@@ -146,7 +162,7 @@ def begin_attendance(phone: str, staff: dict[str, Any], action: str) -> str:
         conn.commit()
     finally:
         conn.close()
-    label = "CHECK IN" if action == "CHECKIN" else "CHECK OUT"
+    label = {"CHECKIN": "CHECK IN", "CHECKOUT": "CHECK OUT", "MOVE": "MOVE IN / TRANSFER"}[action]
     return (
         f"📍 {label} — LOCATION REQUIRED\n\n"
         "In WhatsApp, tap 📎/＋ → Location → Send your current location.\n\n"
@@ -161,6 +177,7 @@ def _nearest_office(
     cur, latitude: float, longitude: float, action: str, office_scope: str = "ALL"
 ) -> dict[str, Any]:
     permission = "allow_checkin" if action == "CHECKIN" else "allow_checkout"
+    permission_sql = "" if action == "MOVE" else f" AND {permission}=TRUE"
     scope = str(office_scope or "ALL").upper()
     scope_office = {
         "COURT_ONLY": "Court Chamber Office",
@@ -171,7 +188,7 @@ def _nearest_office(
     cur.execute(f"""
         SELECT id,office_name,latitude,longitude,allowed_radius_meters
         FROM attendance_offices
-        WHERE is_active=TRUE AND {permission}=TRUE
+        WHERE is_active=TRUE {permission_sql}
         {scope_sql}
         ORDER BY id
     """, params)
@@ -229,7 +246,7 @@ def review_attendance_location(
             """, (phone, staff["telegram_user_id"], PENDING_MINUTES))
             pending = cur.fetchone()
             if not pending:
-                return {"reply": "❌ No active attendance request. Select Check In or Check Out first."}
+                return {"reply": "❌ No active attendance request. Select Check In, Move In or Check Out first."}
             action = str(pending["action"])
             error = _action_error(cur, int(staff["telegram_user_id"]), action, _now_local())
             if error:
@@ -262,7 +279,7 @@ def review_attendance_location(
                 distance, phone,
             ))
         conn.commit()
-        label = "Check In" if action == "CHECKIN" else "Check Out"
+        label = {"CHECKIN": "Check In", "CHECKOUT": "Check Out", "MOVE": "Move In / Transfer"}[action]
         return {
             "reply": (
                 f"⚠️ CONFIRM {label.upper()}\n\n"
@@ -329,30 +346,31 @@ def confirm_attendance(phone: str, staff: dict[str, Any], action: str) -> dict[s
                     "reply": f"❌ This {action.lower()} was recorded recently. Wait {DUPLICATE_MINUTES} minutes.",
                 }
 
-            cur.execute("""
-                SELECT ad_email,ad_password FROM staff_accounts
-                WHERE telegram_user_id=%s AND whatsapp_phone=%s
-                  AND COALESCE(is_active,TRUE)=TRUE LIMIT 1
-            """, (staff["telegram_user_id"], phone))
-            credentials = cur.fetchone()
-            if not credentials or not credentials.get("ad_email") or not credentials.get("ad_password"):
-                return {"success": False, "reply": "❌ Advocate Diaries credentials are unavailable."}
+            if action != "MOVE":
+                cur.execute("""
+                    SELECT ad_email,ad_password FROM staff_accounts
+                    WHERE telegram_user_id=%s AND whatsapp_phone=%s
+                      AND COALESCE(is_active,TRUE)=TRUE LIMIT 1
+                """, (staff["telegram_user_id"], phone))
+                credentials = cur.fetchone()
+                if not credentials or not credentials.get("ad_email") or not credentials.get("ad_password"):
+                    return {"success": False, "reply": "❌ Advocate Diaries credentials are unavailable."}
 
-            from advocate_web import AdvocateWeb
+                from advocate_web import AdvocateWeb
 
-            web = AdvocateWeb(
-                email=str(credentials["ad_email"]).strip(),
-                password=str(credentials["ad_password"]).strip(),
-            )
-            login_ok, _ = web.test_login()
-            if not login_ok:
-                return {"success": False, "reply": "❌ Advocate Diaries login failed. Nothing was recorded."}
-            response = web.punch_in() if action == "CHECKIN" else web.punch_out()
-            if response.status_code != 200:
-                return {
-                    "success": False,
-                    "reply": f"❌ Advocate Diaries attendance failed (status {response.status_code}). Nothing was recorded.",
-                }
+                web = AdvocateWeb(
+                    email=str(credentials["ad_email"]).strip(),
+                    password=str(credentials["ad_password"]).strip(),
+                )
+                login_ok, _ = web.test_login()
+                if not login_ok:
+                    return {"success": False, "reply": "❌ Advocate Diaries login failed. Nothing was recorded."}
+                response = web.punch_in() if action == "CHECKIN" else web.punch_out()
+                if response.status_code != 200:
+                    return {
+                        "success": False,
+                        "reply": f"❌ Advocate Diaries attendance failed (status {response.status_code}). Nothing was recorded.",
+                    }
 
             latitude = float(pending["latitude"])
             longitude = float(pending["longitude"])
@@ -369,7 +387,34 @@ def confirm_attendance(phone: str, staff: dict[str, Any], action: str) -> dict[s
             ))
 
             working_minutes = None
-            if action == "CHECKIN":
+            if action == "MOVE":
+                session = _session(cur, int(staff["telegram_user_id"]), now.date())
+                from_office_id = session.get("current_office_id") or session.get("checkin_office_id")
+                from_office_name = session.get("current_office_name") or session.get("checkin_office_name")
+                destination = _nearest_office(cur, latitude, longitude, "MOVE", str(staff.get("attendance_office_scope") or "ALL"))
+                if (destination['id'] != pending['office_id']
+                    or float(destination['distance_meters']) > int(destination.get('allowed_radius_meters') or 300)):
+                    conn.rollback()
+                    return {"success": False, "reply": "❌ Destination permission or radius changed. Start MOVE IN again."}
+                if from_office_id == pending['office_id']:
+                    conn.rollback()
+                    return {"success": False, "reply": "ℹ️ You are already marked at this office. No transfer was recorded."}
+                cur.execute("""
+                    INSERT INTO attendance_movements(
+                        attendance_session_id,telegram_user_id,staff_name,
+                        from_office_id,from_office_name,to_office_id,to_office_name,
+                        latitude,longitude,accuracy_meters,distance_meters,map_link,moved_at
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s)
+                """, (session['id'], staff['telegram_user_id'], staff['staff_name'],
+                      from_office_id, from_office_name, pending['office_id'], pending['office_name'],
+                      latitude, longitude, pending['distance_meters'], map_link, now))
+                cur.execute("""
+                    UPDATE attendance_sessions SET current_office_id=%s,current_office_name=%s,updated_at=%s
+                    WHERE id=%s AND status='OPEN' AND checkout_time IS NULL
+                """, (pending['office_id'], pending['office_name'], now, session['id']))
+                if cur.rowcount != 1:
+                    raise ValueError("Attendance session changed. Start MOVE IN again.")
+            elif action == "CHECKIN":
                 cur.execute("""
                     INSERT INTO attendance_sessions(
                         telegram_user_id,staff_name,attendance_date,checkin_time,
@@ -410,7 +455,7 @@ def confirm_attendance(phone: str, staff: dict[str, Any], action: str) -> dict[s
                 ))
             cur.execute("DELETE FROM whatsapp_attendance_pending WHERE whatsapp_phone=%s", (phone,))
         conn.commit()
-        label = "Check-in" if action == "CHECKIN" else "Check-out"
+        label = {"CHECKIN": "Check-in", "CHECKOUT": "Check-out", "MOVE": "Office transfer"}[action]
         lines = [
             f"✅ {label} completed successfully.", "",
             f"👤 {staff['staff_name']}", f"🏢 {pending['office_name']}",
@@ -428,6 +473,9 @@ def confirm_attendance(phone: str, staff: dict[str, Any], action: str) -> dict[s
             map_link=map_link,
             working_minutes=working_minutes,
         )
+        if action == "MOVE":
+            notification += f"\n🏢 From: {from_office_name or '-'}\n🏢 To: {pending['office_name']}"
+            lines.append("Attendance remains open; original check-in time is unchanged.")
         return {
             "success": True,
             "reply": "\n".join(lines),

@@ -243,8 +243,9 @@ def build_file_selection_picker(rows: list[dict[str, Any]], page: int = 0):
         mark = "✅" if row.get("selected") else "⬜"
         picker.append({
             "id": f"owner_files_toggle:{int(row['id'])}:{page}",
-            "title": f"{mark} {row.get('case_number') or 'Open case'}",
+            "title": f"{mark} {row.get('case_title') or 'Title not recorded'}"[:24],
             "description": (
+                f"{row.get('case_number') or 'Case number not entered'} · "
                 f"{row.get('case_title') or 'Title not recorded'} · "
                 f"{row.get('purpose') or 'Purpose not recorded'}"
             ),

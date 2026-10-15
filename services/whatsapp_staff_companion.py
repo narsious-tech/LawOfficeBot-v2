@@ -51,7 +51,7 @@ def staff_companion_enabled() -> bool:
 
 def classify_staff_command(text: str) -> tuple[str, str]:
     command = re.sub(r"\s+", " ", str(text or "")).strip()
-    upper = command.upper()
+    upper = command.upper().lstrip("/")
     if upper in {"MENU", "HI", "HELLO", "START", "/START"}:
         return "MENU", ""
     if upper in {"HELP", "HOW TO USE"}:
@@ -76,6 +76,8 @@ def classify_staff_command(text: str) -> tuple[str, str]:
         return "ATTENDANCE_STATUS", ""
     if upper in {"CHECK IN", "CHECKIN"}:
         return "ATTENDANCE_BEGIN", "CHECKIN"
+    if upper in {"MOVE IN", "MOVEIN", "MOVE", "TRANSFER", "OFFICE TRANSFER", "MOVE OFFICE"}:
+        return "ATTENDANCE_BEGIN", "MOVE"
     if upper in {"CHECK OUT", "CHECKOUT"}:
         return "ATTENDANCE_BEGIN", "CHECKOUT"
     if upper in {"CANCEL", "STOP"}:
@@ -333,7 +335,8 @@ def _attendance_status(cur, staff: dict[str, Any]) -> str:
     if not table_row or not table_row.get("attendance_table"):
         return "🕒 ATTENDANCE\n\nAttendance records are not available."
     cur.execute("""
-        SELECT checkin_time AS checkin_time, checkout_time AS checkout_time
+        SELECT checkin_time AS checkin_time, checkout_time AS checkout_time,
+               COALESCE(current_office_name,checkin_office_name) AS current_office_name
         FROM attendance_sessions
         WHERE telegram_user_id=%s AND attendance_date=CURRENT_DATE
         LIMIT 1
@@ -346,7 +349,7 @@ def _attendance_status(cur, staff: dict[str, Any]) -> str:
             f"🕒 ATTENDANCE\n\n✅ Checked in: {row.get('checkin_time')}\n"
             f"🏁 Checked out: {row.get('checkout_time')}"
         )
-    return f"🕒 ATTENDANCE\n\n✅ Present\nChecked in: {row.get('checkin_time')}\nCheckout is pending."
+    return f"🕒 ATTENDANCE\n\n✅ Present\nChecked in: {row.get('checkin_time')}\nCurrent office: {row.get('current_office_name') or 'Not recorded'}\nCheckout is pending."
 
 
 def _hearing_replies(days_ahead: int) -> list[str]:
@@ -507,7 +510,7 @@ def menu_rows() -> list[dict[str, str]]:
         {"id": "today_hearings", "title": "Today Hearings", "description": "Today's cause list"},
         {"id": "tomorrow_hearings", "title": "Tomorrow Hearings", "description": "Tomorrow's cause list"},
         {"id": "my_work", "title": "My Work", "description": "View and complete assigned work"},
-        {"id": "office_status", "title": "Office Status", "description": "Pending, overdue and attendance"},
+        {"id": "move_in", "title": "Move In / Transfer", "description": "Arrive at another office during an open session"},
         {"id": "attendance_status", "title": "Attendance Status", "description": "Your attendance today"},
         {"id": "check_in", "title": "Check In", "description": "Share current office location"},
         {"id": "check_out", "title": "Check Out", "description": "Share current office location"},
@@ -524,7 +527,9 @@ def help_text() -> str:
         "Work: MY WORK\n"
         "Complete: choose a task, or send DONE <task number>\n"
         "Search: CASE CS/123/2026 or CASE party name\n"
-        "Attendance: CHECK IN, CHECK OUT or ATTENDANCE STATUS\n\n"
+        "Attendance: CHECK IN, MOVE IN, CHECK OUT or ATTENDANCE STATUS\n"
+        "MOVE IN / TRANSFER records arrival at another office without another punch-in.\n"
+        "Office summary: OFFICE STATUS\n\n"
         "Every completion and attendance punch requires confirmation. Administrative "
         "corrections and approvals remain protected in Telegram."
     )
@@ -546,7 +551,9 @@ def handle_staff_inbound(item: dict[str, Any]) -> dict[str, Any]:
             staff = _staff_for_phone(cur, phone)
             if not staff:
                 return {"is_staff": False}
-            if action_id.startswith("staff_attendance_confirm:"):
+            if action_id in {"check_in", "check_out", "move_in"}:
+                action, argument = "ATTENDANCE_BEGIN", {"check_in": "CHECKIN", "check_out": "CHECKOUT", "move_in": "MOVE"}[action_id]
+            elif action_id.startswith("staff_attendance_confirm:"):
                 action, argument = "ATTENDANCE_CONFIRM", action_id.partition(":")[2]
             elif action_id == "staff_attendance_cancel":
                 action, argument = "ATTENDANCE_CANCEL", ""
