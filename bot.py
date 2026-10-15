@@ -3741,6 +3741,9 @@ app.add_handler(CommandHandler("workcontrol", workcontrol))
 app.add_handler(CommandHandler("reconcileassignments", reconcileassignments))
 app.add_handler(CallbackQueryHandler(workspace13_callback, pattern=r"^s13:"))
 
+from commands.ad_work_repair import register_ad_work_repair_handlers
+register_ad_work_repair_handlers(app)
+
 app.add_handler(CommandHandler("works", works))
 app.add_handler(CommandHandler("work", work))
 app.add_handler(CommandHandler("completework", completework))
