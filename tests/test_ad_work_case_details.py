@@ -17,6 +17,31 @@ class WorkCaseDetailsTests(unittest.TestCase):
         self.assertEqual(records[0].next_hearing, '20-10-2026')
         self.assertEqual(records[0].work_id, '600')
 
+    def test_actual_current_ad_layout_from_work_one(self):
+        record = parse_works_html(page('Kuldeep Singh VS Shivansh Mohan<br>Civil SUIT · CS/5365/2025<br>Next hearing:<br>22-10-2026<br>pending', '600', 'Draft reply of POD'))[0]
+        self.assertEqual(record.case_title, 'Kuldeep Singh VS Shivansh Mohan')
+        self.assertEqual(record.case_type, 'Civil SUIT')
+        self.assertEqual(record.case_number, 'CS/5365/2025')
+        self.assertEqual(record.next_hearing, '22-10-2026')
+        self.assertEqual(record.description, 'Draft reply of POD')
+
+    def test_current_layout_repairs_existing_task_by_its_work_id(self):
+        records = parse_works_html(page('Kuldeep Singh VS Shivansh Mohan<br>Civil SUIT · CS/5365/2025<br>Next hearing:<br>22-10-2026<br>pending', '600'))
+        conn = MagicMock(); cur=conn.cursor.return_value.__enter__.return_value
+        cur.fetchall.return_value=[('600',)]; cur.rowcount=1
+        db=types.ModuleType('psycopg2'); db.connect=MagicMock(return_value=conn)
+        cfg=types.ModuleType('config'); cfg.DATABASE_URL='unused'
+        with patch.dict(sys.modules, {'psycopg2':db, 'config':cfg}):
+            result=repair.repair_work_case_details(records)
+        self.assertEqual(result['updated'],1)
+        update=next(call for call in cur.execute.call_args_list if 'UPDATE tasks' in call.args[0])
+        self.assertEqual(update.args[1][:3],('CS/5365/2025','Kuldeep Singh VS Shivansh Mohan','600'))
+
+    def test_unknown_layout_does_not_guess_from_work_description(self):
+        record = parse_works_html(page('Unknown case data<br>Next hearing:<br>22-10-2026<br>pending', '600', 'Draft reply in CS/999/2026'))[0]
+        self.assertEqual(record.case_title, '')
+        self.assertEqual(record.case_number, '')
+
     def test_inline_and_case_no_alias(self):
         record=parse_works_html(page('case title: Alpha vs Beta<br>Case No.: CS/456/2026<br>Next Hearing: 21-10-2026'))[0]
         self.assertEqual(record.case_title, 'Alpha vs Beta')
