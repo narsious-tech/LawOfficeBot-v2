@@ -197,22 +197,22 @@ def owner_menu() -> str:
 
 
 def _office_work_rows(cur) -> list[dict[str, Any]]:
+    from services.ad_work_case_repair import repair_work_case_details
+    repair_work_case_details()
     cur.execute("""
         SELECT t.id AS task_id, t.task AS task_text,
-               t.assigned_to AS staff_name, t.case_number AS case_number,
+               t.assigned_to AS staff_name, t.case_number AS case_number, t.source_type AS source_type,
                t.deadline AS deadline, t.due_at AS due_at,
-               COALESCE(linked_case.case_title,'') AS case_title
+               COALESCE(linked_case.case_title,CASE WHEN t.source_type='advocate_diaries_work' THEN NULLIF(TRIM(t.notes),'') END,'') AS case_title
         FROM tasks t
         LEFT JOIN LATERAL (
-            SELECT c.case_title
+            SELECT MIN(NULLIF(TRIM(c.case_title),'')) AS case_title
             FROM cases c
-            WHERE LOWER(TRIM(COALESCE(c.case_number,'')))=
-                  LOWER(TRIM(COALESCE(t.case_number,'')))
-               OR LOWER(TRIM(COALESCE(c.case_id,'')))=
-                  LOWER(TRIM(COALESCE(t.case_number,'')))
-            ORDER BY c.id DESC
-            LIMIT 1
-        ) linked_case ON NULLIF(TRIM(COALESCE(t.case_number,'')),'') IS NOT NULL
+            WHERE NULLIF(TRIM(t.case_number),'') IS NOT NULL
+              AND (LOWER(TRIM(COALESCE(c.case_number,'')))=LOWER(TRIM(t.case_number))
+                OR LOWER(TRIM(COALESCE(c.case_id,'')))=LOWER(TRIM(t.case_number)))
+            HAVING COUNT(DISTINCT NULLIF(TRIM(c.case_title),''))=1
+        ) linked_case ON TRUE
         WHERE UPPER(COALESCE(t.status,'PENDING'))<>ALL(%s)
         ORDER BY t.id DESC
     """, (list(CLOSED),))
@@ -265,7 +265,7 @@ def _owner_work(cur, page: int = 1, page_size: int = 10) -> tuple[str, int, int]
             f"#{row['task_id']} · {row.get('staff_name') or 'Unassigned'}",
             f"📝 {row.get('task_text') or 'No description'}",
         ])
-        if row.get("case_number"):
+        if row.get("case_number") or row.get("case_title") or row.get("source_type") == "advocate_diaries_work":
             lines.extend([
                 f"⚖️ {row.get('case_title') or 'Case title not recorded'}",
                 f"🔢 {row.get('case_number')}",

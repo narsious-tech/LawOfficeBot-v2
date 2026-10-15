@@ -102,18 +102,18 @@ def parse_works_html(html: str) -> list[AdvocateWork]:
             if line.strip()
         ]
 
-        for index, line in enumerate(lines):
-            if line.startswith("Case Title:"):
-                case_title = line.partition(":")[2].strip()
-            elif line.startswith("Case Type:"):
-                case_type = line.partition(":")[2].strip()
-            elif line.startswith("Case Number:"):
-                case_number = line.partition(":")[2].strip()
-            elif line.startswith("Next Hearing:"):
-                inline = line.partition(":")[2].strip()
-                next_hearing = inline or (
-                    lines[index + 1] if index + 1 < len(lines) else ""
-                )
+        # Labels and values can be separated by nested spans, <br> or newlines.
+        # Stop at the next known label so a blank field cannot consume it.
+        label_pattern = r"Case\s+Title|Case\s+Type|Case\s+(?:Number|No\.?)|Next\s+Hearing"
+        labelled = "\n".join(lines)
+        values = {}
+        for match in re.finditer(rf"({label_pattern})\s*:\s*(.*?)(?=(?:{label_pattern})\s*:|$)", labelled, re.I | re.S):
+            label = re.sub(r"\s+", " ", match.group(1)).lower().rstrip('.')
+            values[label] = re.sub(r"\s+", " ", match.group(2)).strip()
+        case_title = values.get("case title", "")
+        case_type = values.get("case type", "")
+        case_number = values.get("case number", "") or values.get("case no", "")
+        next_hearing = values.get("next hearing", "")
 
         parsed.append(
             AdvocateWork(

@@ -243,6 +243,8 @@ def _staff_for_phone(cur, phone: str) -> dict[str, Any] | None:
 
 
 def _my_work(cur, staff_name: str) -> str:
+    from services.ad_work_case_repair import repair_work_case_details
+    repair_work_case_details()
     cur.execute("SELECT to_regclass('public.tasks') AS task_table")
     table_row = cur.fetchone()
     if not table_row or not table_row.get("task_table"):
@@ -253,15 +255,14 @@ def _my_work(cur, staff_name: str) -> str:
                t.case_number AS task_case_number,
                t.deadline AS deadline,
                t.due_at AS due_at,
-               COALESCE(c.case_title,'') AS case_title
+               COALESCE(c.case_title,CASE WHEN t.source_type='advocate_diaries_work' THEN NULLIF(TRIM(t.notes),'') END,'') AS case_title
         FROM tasks t
         LEFT JOIN LATERAL (
-            SELECT case_title FROM cases
-            WHERE LOWER(TRIM(COALESCE(case_number,'')))=
-                  LOWER(TRIM(COALESCE(t.case_number,'')))
-               OR LOWER(TRIM(COALESCE(case_id,'')))=
-                  LOWER(TRIM(COALESCE(t.case_number,'')))
-            ORDER BY id DESC LIMIT 1
+            SELECT MIN(NULLIF(TRIM(case_title),'')) AS case_title FROM cases
+            WHERE NULLIF(TRIM(t.case_number),'') IS NOT NULL
+              AND (LOWER(TRIM(COALESCE(case_number,'')))=LOWER(TRIM(t.case_number))
+                OR LOWER(TRIM(COALESCE(case_id,'')))=LOWER(TRIM(t.case_number)))
+            HAVING COUNT(DISTINCT NULLIF(TRIM(case_title),''))=1
         ) c ON TRUE
         WHERE LOWER(TRIM(COALESCE(t.assigned_to,'')))=LOWER(TRIM(%s))
           AND UPPER(COALESCE(t.status,'PENDING'))<>ALL(%s)
@@ -276,7 +277,8 @@ def _my_work(cur, staff_name: str) -> str:
         due = row.get("due_at") or row.get("deadline") or "Not fixed"
         lines.extend([
             f"#{row.get('task_id')} · "
-            f"{row.get('case_title') or row.get('task_case_number') or 'General office work'}",
+            f"{row.get('case_title') or 'Case title not recorded'}",
+            f"🔢 {row.get('task_case_number') or 'Case number not recorded'}",
             f"📝 {row.get('task_text') or 'Work details not recorded'}",
             f"📅 Due: {due}", "",
         ])
@@ -364,7 +366,7 @@ def _hearing_replies(days_ahead: int) -> list[str]:
 
 def _task_picker_rows(cur, staff_name: str) -> list[dict[str, str]]:
     cur.execute("""
-        SELECT id,task,COALESCE(case_number,'') AS case_number,
+        SELECT id,task,notes,source_type,COALESCE(case_number,'') AS case_number,
                COALESCE(due_at::TEXT,deadline,'') AS due
         FROM tasks
         WHERE LOWER(TRIM(COALESCE(assigned_to,'')))=LOWER(TRIM(%s))
@@ -378,6 +380,7 @@ def _task_picker_rows(cur, staff_name: str) -> list[dict[str, str]]:
         label = str(row.get("task") or "Work")
         description = " · ".join(
             value for value in (
+                str(row.get("notes") or "") if row.get("source_type") == "advocate_diaries_work" else "",
                 str(row.get("case_number") or ""), str(row.get("due") or ""),
             ) if value
         )
@@ -390,6 +393,8 @@ def _task_picker_rows(cur, staff_name: str) -> list[dict[str, str]]:
 
 
 def _task_for_staff(cur, staff_name: str, task_id: str) -> dict[str, Any] | None:
+    from services.ad_work_case_repair import repair_work_case_details
+    repair_work_case_details()
     if not str(task_id).isdigit():
         return None
     cur.execute("""
@@ -410,7 +415,8 @@ def _task_confirmation(task: dict[str, Any]) -> str:
         "⚠️ CONFIRM WORK COMPLETION\n\n"
         f"Task #{task['id']}\n"
         f"📝 {task.get('task') or 'No description'}\n"
-        f"⚖️ {task.get('case_number') or 'General office work'}\n"
+        f"⚖️ {(task.get('notes') if task.get('source_type') == 'advocate_diaries_work' else None) or 'Case title not recorded'}\n"
+        f"🔢 {task.get('case_number') or 'Case number not recorded'}\n"
         f"📅 Due: {task.get('due') or 'Not fixed'}\n\n"
         "Confirm only after the work has actually been completed."
     )
