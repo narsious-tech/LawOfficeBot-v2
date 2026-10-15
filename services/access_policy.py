@@ -33,6 +33,7 @@ SUPERVISOR_COMMANDS = {
 }
 
 ADMIN_COMMANDS = {
+    "repairworklinks",
     "synccases", "synccasesv2", "synccasesv3", "synctimeline", "repairmobiles",
     "syncattendancetoday", "linkedstaff", "delinkstaff", "approveattendance",
     "ai", "aicost", "loanledger", "deleteledger", "whatsappstatus",
@@ -56,7 +57,7 @@ ADMIN_COMMANDS = {
     "whatsappreminderstatus", "testwhatsappreminders", "whatsappconsent",
 }
 
-ADMIN_CALLBACK_PREFIXES = ("ecr:", "ejg:", "loan:", "ajayai:", "wac:")
+ADMIN_CALLBACK_PREFIXES = ("awr:", "ecr:", "ejg:", "loan:", "ajayai:", "wac:")
 SUPERVISOR_CALLBACK_PREFIXES = (
     "comm:", "efs:", "s13:works:all", "s13:finance:", "s13:staff:"
 )
