@@ -115,6 +115,25 @@ def parse_works_html(html: str) -> list[AdvocateWork]:
         case_number = values.get("case number", "") or values.get("case no", "")
         next_hearing = values.get("next hearing", "")
 
+        # Current AD layout: title, then "Civil SUIT · CS/5365/2025",
+        # followed by a hearing label/date and a status line (without Case labels).
+        if not case_number:
+            for index, line in enumerate(lines):
+                match = re.fullmatch(r"([^:]+?)\s*[·•|]\s*(.+\d.*)", line)
+                if not match:
+                    continue
+                candidate_type, candidate_number = match.groups()
+                # Do not treat labelled fields or later dates/status as a case row.
+                if index != 1 or any(re.match(r"(?:Case|Next)\s", value, re.I) for value in (lines[0], candidate_type)):
+                    continue
+                case_type = case_type or candidate_type.strip()
+                case_number = candidate_number.strip()
+                case_title = case_title or lines[0].strip()
+                break
+        if next_hearing:
+            # Status belongs to the work, not the hearing date.
+            next_hearing = re.sub(r"\s+(?:pending|completed|complete|closed|done)\s*$", "", next_hearing, flags=re.I).strip()
+
         parsed.append(
             AdvocateWork(
                 work_id=work_id,
