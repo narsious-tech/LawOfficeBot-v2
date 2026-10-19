@@ -76,6 +76,11 @@ from commands.evening_dashboard import (
     sunday_missing_files_escalation_job,
     sunday_final_file_readiness_job,
 )
+from commands.judge_leave import (
+    build_judge_leave_handler,
+    judge_leave_pre_file_job,
+    saturday_judge_leave_pre_file_job,
+)
 from commands.workspace_v13 import (
     caseworkspace13, workboard, myworks, workspace13_callback,
 )
@@ -4070,6 +4075,7 @@ app.add_handler(CommandHandler("nextdateslist", nextdateslist))
 app.add_handler(CommandHandler("eveningdashboard", eveningdashboard))
 app.add_handler(CommandHandler("printablecauselist", printablecauselist))
 app.add_handler(CommandHandler("filesready", filesready))
+app.add_handler(build_judge_leave_handler())
 app.add_handler(CommandHandler("mydashboard", mydashboard))
 app.add_handler(CommandHandler("officestatus", officestatus))
 app.add_handler(CommandHandler("readiness", readiness))
@@ -4164,9 +4170,21 @@ app.job_queue.run_daily(
 
 
 app.job_queue.run_daily(
+    judge_leave_pre_file_job,
+    time=time(hour=16, minute=0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="judge_leave_and_holiday_alert_400pm",
+)
+
+app.job_queue.run_daily(
     evening_dashboard_job,
     time=time(hour=16, minute=30, tzinfo=ZoneInfo("Asia/Kolkata")),
     name="evening_dashboard_430pm"
+)
+
+app.job_queue.run_daily(
+    saturday_judge_leave_pre_file_job,
+    time=time(hour=12, minute=30, tzinfo=ZoneInfo("Asia/Kolkata")),
+    name="working_saturday_judge_leave_alert_1230pm",
 )
 
 app.job_queue.run_daily(

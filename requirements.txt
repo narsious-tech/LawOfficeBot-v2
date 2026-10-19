@@ -9,5 +9,6 @@ lxml
 Flask==3.1.2
 pypdf
 reportlab>=4.0,<5.0
+holidays>=0.106,<1.0
 
 openai>=2.0,<3.0

@@ -155,6 +155,16 @@ def _process_whatsapp_inbound(item):
     """Acknowledge Meta quickly, then process slow office services in background."""
     try:
         if staff_companion_enabled():
+            from services.whatsapp_judge_leave import handle_judge_leave_inbound
+            leave_result = handle_judge_leave_inbound(item)
+            if leave_result is not None:
+                if leave_result.get("buttons"):
+                    send_whatsapp_buttons(
+                        leave_result["phone"], leave_result["reply"], leave_result["buttons"]
+                    )
+                else:
+                    send_whatsapp_text(leave_result["phone"], leave_result["reply"])
+                return
             from services.whatsapp_ecourts_dates import handle_date_inbound
             date_result = handle_date_inbound(item)
             if date_result is not None:
