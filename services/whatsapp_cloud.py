@@ -159,6 +159,31 @@ def send_text_message(phone: str, text: str) -> dict[str, Any]:
     return {"provider_message_id": provider_id, "response": payload}
 
 
+def download_media(media_id: str, max_bytes: int = 12 * 1024 * 1024) -> tuple[bytes, str]:
+    """Download one authenticated inbound Meta media object."""
+    cfg = whatsapp_config()
+    if not transport_ready():
+        raise RuntimeError("WhatsApp Cloud API configuration is incomplete.")
+    headers = {"Authorization": f"Bearer {cfg['access_token']}"}
+    metadata = requests.get(
+        f"https://graph.facebook.com/{cfg['graph_version']}/{media_id}",
+        headers=headers,
+        timeout=30,
+    )
+    payload = metadata.json() if metadata.content else {}
+    if metadata.status_code >= 400 or not payload.get("url"):
+        message = ((payload.get("error") or {}).get("message")) or f"HTTP {metadata.status_code}"
+        raise RuntimeError(f"Meta media lookup failed: {message}")
+    response = requests.get(payload["url"], headers=headers, timeout=60, stream=True)
+    response.raise_for_status()
+    content = bytearray()
+    for chunk in response.iter_content(64 * 1024):
+        content.extend(chunk)
+        if len(content) > max_bytes:
+            raise ValueError("The WhatsApp PDF is larger than 12 MB.")
+    return bytes(content), str(payload.get("mime_type") or response.headers.get("Content-Type") or "")
+
+
 def send_button_message(
     phone: str, body: str, buttons: list[tuple[str, str]]
 ) -> dict[str, Any]:
@@ -504,6 +529,7 @@ def process_webhook(payload: dict[str, Any]) -> list[dict[str, Any]]:
                             or (message.get("button") or {}).get("payload")
                         )
                         location = message.get("location") or {}
+                        media = message.get(kind) or {}
                         context = message.get("context") or {}
                         text = (
                             ((message.get("text") or {}).get("body"))
@@ -539,6 +565,9 @@ def process_webhook(payload: dict[str, Any]) -> list[dict[str, Any]]:
                                     context.get("forwarded")
                                     or context.get("frequently_forwarded")
                                 ),
+                                "media_id": media.get("id") if isinstance(media, dict) else None,
+                                "media_mime_type": media.get("mime_type") if isinstance(media, dict) else None,
+                                "media_filename": media.get("filename") if isinstance(media, dict) else None,
                             })
         conn.commit()
         return inbound_alerts

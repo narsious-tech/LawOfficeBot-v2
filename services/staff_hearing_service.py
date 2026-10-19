@@ -18,11 +18,15 @@ def fetch_staff_hearings(target_date: date) -> dict[str, Any]:
         source = "API"
     except Exception:
         groups, source = fetch_advocate_diaries_cause_groups(target_date)
+    from services.judge_leave_service import apply_leave_exclusions
+    groups, excluded, leave_entries = apply_leave_exclusions(groups, target_date)
     return {
         "date": target_date,
         "source": str(source),
         "groups": groups or [],
         "total": sum(len(group.get("cases") or []) for group in groups or []),
+        "leave_excluded": len(excluded),
+        "leave_judges": [row.get("judge_name") for row in leave_entries],
     }
 
 
@@ -36,6 +40,8 @@ def hearing_message_chunks(result: dict[str, Any], limit: int = 3900) -> list[st
         f"📌 Total matters: {total}\n"
         f"🔗 Source: Advocate Diaries {result.get('source') or '-'}"
     )
+    if result.get("leave_excluded"):
+        header += f"\n👨‍⚖️ Judge-leave matters ignored: {int(result['leave_excluded'])}"
     if total == 0:
         return [header + "\n\nNo hearings are listed for this date."]
 

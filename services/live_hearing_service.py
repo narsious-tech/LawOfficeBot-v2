@@ -93,6 +93,8 @@ def sync_live_hearings(target_date: date | None = None) -> tuple[int, str]:
     ensure_live_hearing_tables()
     target_date = target_date or datetime.now(IST).date()
     groups, source = fetch_advocate_diaries_cause_groups(target_date)
+    from services.judge_leave_service import apply_leave_exclusions
+    groups, _, _ = apply_leave_exclusions(groups, target_date)
     conn = _connect(); cur = conn.cursor()
     count = 0
     try:
@@ -134,7 +136,10 @@ def list_live_hearings(target_date: date | None = None):
                 LOWER(COALESCE(judge_name, '')),
                 id
         """, (target_date,))
-        return [dict(r) for r in cur.fetchall()]
+        rows = [dict(r) for r in cur.fetchall()]
+        from services.judge_leave_service import confirmed_leave_entries, normalize
+        leave_keys = {row.get("judge_key") for row in confirmed_leave_entries(target_date)}
+        return [row for row in rows if normalize(row.get("judge_name")) not in leave_keys]
     finally:
         cur.close(); conn.close()
 

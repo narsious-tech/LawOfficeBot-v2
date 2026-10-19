@@ -86,12 +86,15 @@ def owner_evening_dashboard() -> str:
     plan = evening_target_plan()
     target = plan.target_date
     groups, source = fetch_advocate_diaries_cause_groups(target)
+    from services.judge_leave_service import apply_leave_exclusions
+    groups, excluded, leave_entries = apply_leave_exclusions(groups, target)
     cases = _flatten_cases(groups)
     lines = [
         "🌆 OWNER EVENING DASHBOARD",
         f"📅 Next court day: {target.strftime('%d-%m-%Y')}",
         f"🗓 {plan.heading}",
         f"⚖️ Hearings: {len(cases)}",
+        f"👨‍⚖️ Judge-leave exclusions: {len(excluded)}",
         f"🏛 Court groups: {len(groups)}",
         f"🔗 Source: Advocate Diaries {source}",
         "",
@@ -173,6 +176,8 @@ def initialize_file_selection(owner_phone: str) -> tuple[Any, int, str]:
     ensure_file_selection_schema()
     plan = evening_target_plan()
     groups, source = fetch_advocate_diaries_cause_groups(plan.target_date)
+    from services.judge_leave_service import apply_leave_exclusions
+    groups, _, _ = apply_leave_exclusions(groups, plan.target_date)
     cases = _flatten_cases(groups)
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
     try:
