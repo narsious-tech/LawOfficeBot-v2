@@ -1178,12 +1178,19 @@ def build_detailed_morning_dashboard():
 
     try:
         groups, advocate_diaries_source = fetch_advocate_diaries_cause_groups(today)
+        from services.judge_leave_service import apply_leave_exclusions
+        groups, leave_excluded, _ = apply_leave_exclusions(groups, today)
         cause_text, total_hearings = build_floor_wise_cause_list(
             groups,
             case_lookup,
             task_lookup
         )
         advocate_diaries_live = True
+        if leave_excluded:
+            cause_text = (
+                f"👨‍⚖️ {len(leave_excluded)} matter(s) ignored due to confirmed judge leave.\n\n"
+                + cause_text
+            )
     except Exception as exc:
         logger.exception("Morning dashboard Advocate Diaries source failed")
         detail = normalize_space(str(exc)) or "No diagnostic detail was returned."

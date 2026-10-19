@@ -354,6 +354,11 @@ async def send_evening_dashboard(
     target = target or _target_date()
     plan_heading = plan_heading or "Tomorrow's court preparation"
     groups, source = await asyncio.to_thread(fetch_advocate_diaries_cause_groups, target)
+    original_total = _case_count(groups)
+    from services.judge_leave_service import apply_leave_exclusions
+    groups, excluded_cases, leave_entries = await asyncio.to_thread(
+        apply_leave_exclusions, groups, target
+    )
     total = _case_count(groups)
     raw_destination = chat_id or os.getenv("OFFICE_GROUP_CHAT_ID") or os.getenv("PHYSICAL_FILE_GROUP_CHAT_ID")
     if not raw_destination:
@@ -368,6 +373,7 @@ async def send_evening_dashboard(
         "🌆 EVENING OPERATIONS DASHBOARD\n"
         f"📅 Tomorrow: {target.strftime('%d %b %Y')}\n"
         f"⚖️ Hearings: {total}\n"
+        f"👨‍⚖️ Judge-leave exclusions: {len(excluded_cases)}\n"
         f"🔗 Cause-list source: Advocate Diaries {source}\n\n"
         "Select only the files that must be brought to the evening office. "
         "The final selected list will be sent to Preet, Priya, Happy and Jimmy.\n\n"
@@ -375,6 +381,17 @@ async def send_evening_dashboard(
         f"{daily_quote(datetime.now(IST).date(), 'evening')}"
     )
     await context.bot.send_message(chat_id=destination, text=text)
+    if leave_entries:
+        leave_names = ", ".join(str(row.get("judge_name") or "-") for row in leave_entries)
+        await context.bot.send_message(
+            chat_id=destination,
+            text=(
+                "👨‍⚖️ CONFIRMED JUDGE LEAVE APPLIED\n"
+                f"Judges: {leave_names}\n"
+                f"Ignored matters: {len(excluded_cases)} of {original_total}\n"
+                "Underlying case dates were not changed."
+            ),
+        )
     await context.bot.send_message(chat_id=destination, text=_physical_file_text(groups, target))
 
     state = _selection_store(context, destination, target)
