@@ -78,16 +78,27 @@ def register_ios_office_dashboard(app):
             admin = authorize()
             if not isinstance(admin, int):
                 return admin
+            stage = 'profile_read'
             try:
                 from services.role_intelligence_service import staff_profile
                 if not staff_profile(admin, read_only=True).get('is_active'):
                     return reply({'ok': False, 'error': 'Access denied'}, 403)
+                stage = 'report_import'
                 from services.ios_court_reports import build_court_report, build_morning_report
+                stage = 'report_build'
                 data = build_morning_report() if kind == 'morning' else build_court_report(kind)
                 return reply(data)
-            except Exception:
-                app.logger.error('iOS court report retrieval failed: %s', kind)
-                return reply({'ok': False, 'error': 'Report unavailable'}, 503)
+            except Exception as exc:
+                error_type = type(exc).__name__
+                # PostgreSQL SQLSTATE is a five-character code, not error text.
+                sqlstate = getattr(exc, 'pgcode', None)
+                sqlstate = sqlstate if isinstance(sqlstate, str) and re.fullmatch(r'[0-9A-Z]{5}', sqlstate) else None
+                app.logger.error('iOS court report retrieval failed: %s stage=%s type=%s sqlstate=%s',
+                                 kind, stage, error_type, sqlstate or '-')
+                code = stage + ':' + error_type + (':' + sqlstate if sqlstate else '')
+                summary = 'Report unavailable. Diagnostic: ' + code
+                return reply({'ok': False, 'error': 'Report unavailable',
+                              'diagnostic': code, 'summary': summary}, 503)
         return view
 
     for path, kind in (('today-hearings', 'today'),

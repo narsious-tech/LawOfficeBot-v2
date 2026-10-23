@@ -1,8 +1,22 @@
 """Read-only adapters for the existing Telegram morning and court reports."""
 from datetime import datetime, timezone
+import logging
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo('Asia/Kolkata')
+
+
+def _step(stage, callback, *args, **kwargs):
+    logger = logging.getLogger(__name__)
+    logger.info('iOS court report step started: %s', stage)
+    try:
+        result = callback(*args, **kwargs)
+    except Exception as exc:
+        # Log only a fixed step label and exception class, never exception text.
+        logger.error('iOS court report step failed: %s type=%s', stage, type(exc).__name__)
+        raise
+    logger.info('iOS court report step completed: %s', stage)
+    return result
 
 
 def build_court_report(kind):
@@ -16,10 +30,11 @@ def build_court_report(kind):
     today = datetime.now(IST).date()
     plan = manual_evening_plan(today) if kind == 'evening' else None
     target = plan.target_date if plan else today
-    groups, source = fetch_advocate_diaries_cause_groups(target)
-    groups, excluded, _ = apply_leave_exclusions(groups, target, read_only=True)
+    groups, source = _step('cause_list_fetch', fetch_advocate_diaries_cause_groups, target)
+    groups, excluded, _ = _step('confirmed_leave_read', apply_leave_exclusions,
+                                 groups, target, read_only=True)
     # Use the bot's floor/room/judge formatter; omit optional task/client enrichment.
-    cause_text, total = build_floor_wise_cause_list(groups, {}, {})
+    cause_text, total = _step('cause_list_format', build_floor_wise_cause_list, groups, {}, {})
     lines = [
         'EVENING OPERATIONS DASHBOARD' if plan else "TODAY'S COURT CAUSE LIST",
         f'Court date: {target:%d-%m-%Y}',
@@ -50,7 +65,7 @@ def build_morning_report():
     from commands.dashboard import build_morning_dashboard
 
     # The existing compact builder reports unavailable sources explicitly.
-    text = build_morning_dashboard(read_only=True)
+    text = _step('morning_build', build_morning_dashboard, read_only=True)
     text = text.replace('Select a module or quick action below.',
                         'Use the Shortcut menu to open another report.')
     return {
