@@ -239,11 +239,14 @@ def decide_batch(batch_id: int, source_identity: str, confirm: bool) -> dict[str
         conn.close()
 
 
-def confirmed_leave_entries(target_date: date) -> list[dict[str, Any]]:
+def confirmed_leave_entries(target_date: date, *, read_only: bool = False) -> list[dict[str, Any]]:
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
     try:
+        if read_only:
+            conn.set_session(readonly=True)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            ensure_schema(cur)
+            if not read_only:
+                ensure_schema(cur)
             cur.execute("""
                 SELECT DISTINCT ON (e.judge_key,e.court_name) e.*
                 FROM judge_leave_entries e
@@ -259,8 +262,9 @@ def confirmed_leave_entries(target_date: date) -> list[dict[str, Any]]:
 def apply_leave_exclusions(
     groups: list[dict[str, Any]], target_date: date,
     entries: list[dict[str, Any]] | None = None,
+    *, read_only: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    entries = confirmed_leave_entries(target_date) if entries is None else entries
+    entries = confirmed_leave_entries(target_date, read_only=read_only) if entries is None else entries
     keys = {str(entry.get("judge_key") or "") for entry in entries}
     kept: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []

@@ -17,7 +17,7 @@ def register_ios_office_dashboard(app):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         return response
 
-    def dashboard():
+    def authorize():
         token = os.getenv('IOS_OFFICE_DASHBOARD_TOKEN', '')
         admin = os.getenv('ADMIN_USER_ID', '').strip()
         if (os.getenv('IOS_OFFICE_DASHBOARD_ENABLED', '').lower() != 'true'
@@ -36,6 +36,12 @@ def register_ios_office_dashboard(app):
             return response
         if request.query_string:
             return reply({'ok': False, 'error': 'Query parameters are not supported'}, 400)
+        return int(admin)
+
+    def dashboard():
+        admin = authorize()
+        if not isinstance(admin, int):
+            return admin
         try:
             from services.role_intelligence_service import role_dashboard
             data = role_dashboard(int(admin), read_only=True)
@@ -66,3 +72,27 @@ def register_ios_office_dashboard(app):
     app.add_url_rule('/api/ios/office-dashboard', 'ios_office_dashboard', dashboard,
                      methods=['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'],
                      provide_automatic_options=False)
+
+    def report_view(kind):
+        def view():
+            admin = authorize()
+            if not isinstance(admin, int):
+                return admin
+            try:
+                from services.role_intelligence_service import staff_profile
+                if not staff_profile(admin, read_only=True).get('is_active'):
+                    return reply({'ok': False, 'error': 'Access denied'}, 403)
+                from services.ios_court_reports import build_court_report, build_morning_report
+                data = build_morning_report() if kind == 'morning' else build_court_report(kind)
+                return reply(data)
+            except Exception:
+                app.logger.error('iOS court report retrieval failed: %s', kind)
+                return reply({'ok': False, 'error': 'Report unavailable'}, 503)
+        return view
+
+    for path, kind in (('today-hearings', 'today'),
+                       ('morning-dashboard', 'morning'),
+                       ('evening-dashboard', 'evening')):
+        app.add_url_rule('/api/ios/' + path, 'ios_report_' + kind, report_view(kind),
+                         methods=['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'],
+                         provide_automatic_options=False)
