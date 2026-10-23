@@ -43,6 +43,9 @@ attendance_app = Flask(
     template_folder="templates"
 )
 
+from services.ios_office_dashboard import register_ios_office_dashboard
+register_ios_office_dashboard(attendance_app)
+
 @attendance_app.get("/health")
 def health():
     return jsonify({"status": "ok", "service": "law-office-attendance"}), 200
