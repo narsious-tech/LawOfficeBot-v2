@@ -848,9 +848,11 @@ def _dashboard_table_columns(cur, table_name):
     return {row[0] for row in cur.fetchall()}
 
 
-def _load_morning_dashboard_database(today):
+def _load_morning_dashboard_database(today, *, read_only=False):
     """Load Sprint 10 dashboard data without assuming every migration exists."""
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+    if read_only:
+        conn.set_session(readonly=True)
     cur = conn.cursor()
 
     try:
@@ -947,7 +949,7 @@ def _safe_number(value):
         return 0.0
 
 
-def _load_command_centre_metrics(today):
+def _load_command_centre_metrics(today, *, read_only=False):
     """Load optional Sprint 10.4 modules without requiring a new migration."""
     metrics = {
         "staff_present": None, "staff_total": None, "staff_not_checked_in": None,
@@ -958,6 +960,8 @@ def _load_command_centre_metrics(today):
     }
     warnings = []
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+    if read_only:
+        conn.set_session(readonly=True)
     cur = conn.cursor()
     try:
         tables = {}
@@ -1050,7 +1054,7 @@ def _load_command_centre_metrics(today):
         cur.close(); conn.close()
 
 
-def build_detailed_morning_dashboard():
+def build_detailed_morning_dashboard(*, read_only=False):
     """Build the Sprint 10 briefing with independently resilient data sources."""
     now = datetime.now(IST)
     today = now.date()
@@ -1064,16 +1068,19 @@ def build_detailed_morning_dashboard():
     advocate_diaries_source = ""
 
     try:
-        task_rows, case_rows, database_warnings = _load_morning_dashboard_database(today)
+        task_rows, case_rows, database_warnings = _load_morning_dashboard_database(today, read_only=read_only)
         source_warnings.extend(database_warnings)
         database_live = True
     except Exception as exc:
-        logger.exception("Morning dashboard database source failed")
+        if read_only:
+            logger.error("Morning dashboard database source failed")
+        else:
+            logger.exception("Morning dashboard database source failed")
         source_warnings.append(
             f"Office database unavailable ({type(exc).__name__}); task and case figures were omitted."
         )
 
-    command_metrics, command_warnings = _load_command_centre_metrics(today) if database_live else ({}, [])
+    command_metrics, command_warnings = _load_command_centre_metrics(today, read_only=read_only) if database_live else ({}, [])
     source_warnings.extend(command_warnings)
 
     case_lookup = {}
@@ -1179,7 +1186,7 @@ def build_detailed_morning_dashboard():
     try:
         groups, advocate_diaries_source = fetch_advocate_diaries_cause_groups(today)
         from services.judge_leave_service import apply_leave_exclusions
-        groups, leave_excluded, _ = apply_leave_exclusions(groups, today)
+        groups, leave_excluded, _ = apply_leave_exclusions(groups, today, read_only=read_only)
         cause_text, total_hearings = build_floor_wise_cause_list(
             groups,
             case_lookup,
@@ -1192,7 +1199,10 @@ def build_detailed_morning_dashboard():
                 + cause_text
             )
     except Exception as exc:
-        logger.exception("Morning dashboard Advocate Diaries source failed")
+        if read_only:
+            logger.error("Morning dashboard Advocate Diaries source failed")
+        else:
+            logger.exception("Morning dashboard Advocate Diaries source failed")
         detail = normalize_space(str(exc)) or "No diagnostic detail was returned."
         source_warnings.append(
             "Advocate Diaries unavailable; cause list and court movement were omitted. "
@@ -1398,9 +1408,9 @@ def _attention_items(detailed):
     return []
 
 
-def build_morning_dashboard():
+def build_morning_dashboard(*, read_only=False):
     """Sprint 11 compact command-centre card backed by Sprint 10 data."""
-    detailed = build_detailed_morning_dashboard()
+    detailed = build_detailed_morning_dashboard(read_only=read_only)
     now = datetime.now(IST)
     hearings = _line_value(detailed, "⚖️ Today's Hearings:", "0")
     overdue = _line_value(detailed, "🔴 Overdue Tasks:", "0")
