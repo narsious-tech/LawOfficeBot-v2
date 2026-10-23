@@ -6,8 +6,11 @@ from psycopg2.extras import RealDictCursor
 
 CLOSED = ("COMPLETED","COMPLETE","DONE","CLOSED","CANCELLED","VERIFIED")
 
-def _connect():
-    return psycopg2.connect(os.environ["DATABASE_URL"])
+def _connect(*, read_only=False):
+    con = psycopg2.connect(os.environ["DATABASE_URL"])
+    if read_only:
+        con.set_session(readonly=True)
+    return con
 
 def ensure_schema() -> None:
     with _connect() as con, con.cursor() as cur:
@@ -66,13 +69,13 @@ def update_file_status(assignment_id:int,status:str,user_id:int,user_name:str,no
         WHERE id=%s RETURNING *""",(status,user_id,user_name,note,assignment_id))
         row=cur.fetchone(); return dict(row) if row else None
 
-def staff_profile(telegram_id:int)->dict:
+def staff_profile(telegram_id:int, *, read_only:bool=False)->dict:
     configured_admin_id=str(os.getenv("ADMIN_USER_ID") or "").strip()
     is_configured_admin=(
         bool(configured_admin_id)
         and str(telegram_id).strip()==configured_admin_id
     )
-    with _connect() as con, con.cursor(cursor_factory=RealDictCursor) as cur:
+    with _connect(read_only=read_only) as con, con.cursor(cursor_factory=RealDictCursor) as cur:
         try:
             cur.execute("SELECT staff_name,role,is_active FROM staff_accounts WHERE telegram_user_id=%s LIMIT 1",(telegram_id,))
         except Exception:
@@ -101,9 +104,12 @@ def _live_ad_pending_work_count()->int:
         )
     return len(parse_works_html(response.text))
 
-def role_dashboard(telegram_id:int)->dict:
-    ensure_schema(); p=staff_profile(telegram_id); name=p['staff_name']; role=p['role']
-    with _connect() as con, con.cursor(cursor_factory=RealDictCursor) as cur:
+def role_dashboard(telegram_id:int, *, read_only:bool=False)->dict:
+    # HTTP reads must never create tables or indexes. Bot behavior is unchanged.
+    if not read_only:
+        ensure_schema()
+    p=staff_profile(telegram_id, read_only=read_only); name=p['staff_name']; role=p['role']
+    with _connect(read_only=read_only) as con, con.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("""SELECT COUNT(*) total,
         COUNT(*) FILTER(WHERE status='BROUGHT') brought,
         COUNT(*) FILTER(WHERE status='NOT_FOUND') not_found,
