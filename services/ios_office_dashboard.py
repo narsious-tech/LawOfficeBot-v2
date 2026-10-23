@@ -107,3 +107,29 @@ def register_ios_office_dashboard(app):
         app.add_url_rule('/api/ios/' + path, 'ios_report_' + kind, report_view(kind),
                          methods=['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'],
                          provide_automatic_options=False)
+
+    def task_report_view(kind):
+        def view():
+            admin = authorize()
+            if not isinstance(admin, int):
+                return admin
+            try:
+                from services.role_intelligence_service import staff_profile
+                if not staff_profile(admin, read_only=True).get('is_active'):
+                    return reply({'ok': False, 'error': 'Access denied'}, 403)
+                from services.ios_task_reports import build_task_report
+                data = build_task_report(kind)
+                return reply(data, 200 if data['ok'] else 503)
+            except Exception as exc:
+                app.logger.error('iOS task report failed: %s type=%s', kind, type(exc).__name__)
+                return reply({'ok': False, 'error': 'Task report unavailable',
+                              'summary': 'Task report unavailable. Check Railway logs.'}, 503)
+        return view
+
+    for path, kind in (('office-tasks', 'office_tasks'),
+                       ('overdue-tasks', 'overdue'),
+                       ('due-today-tasks', 'due_today'),
+                       ('task-deadlines', 'deadlines')):
+        app.add_url_rule('/api/ios/' + path, 'ios_tasks_' + kind, task_report_view(kind),
+                         methods=['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'],
+                         provide_automatic_options=False)
