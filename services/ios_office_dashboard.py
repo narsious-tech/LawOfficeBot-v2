@@ -133,3 +133,22 @@ def register_ios_office_dashboard(app):
         app.add_url_rule('/api/ios/' + path, 'ios_tasks_' + kind, task_report_view(kind),
                          methods=['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'],
                          provide_automatic_options=False)
+
+    def who_in_office():
+        admin = authorize()
+        if not isinstance(admin, int):
+            return admin
+        try:
+            from services.role_intelligence_service import staff_profile
+            if not staff_profile(admin, read_only=True).get('is_active'):
+                return reply({'ok': False, 'error': 'Access denied'}, 403)
+            from services.ios_attendance_reports import build_who_in_office_report
+            return reply(build_who_in_office_report())
+        except Exception as exc:
+            app.logger.error('iOS attendance report failed: type=%s', type(exc).__name__)
+            return reply({'ok': False, 'error': 'Attendance report unavailable',
+                          'summary': 'Attendance report unavailable. Check Railway logs.'}, 503)
+
+    app.add_url_rule('/api/ios/who-in-office', 'ios_who_in_office', who_in_office,
+                     methods=['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'],
+                     provide_automatic_options=False)
