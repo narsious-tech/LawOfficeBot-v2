@@ -31,8 +31,21 @@ def build_court_report(kind):
     plan = manual_evening_plan(today) if kind == 'evening' else None
     target = plan.target_date if plan else today
     groups, source = _step('cause_list_fetch', fetch_advocate_diaries_cause_groups, target)
-    groups, excluded, _ = _step('confirmed_leave_read', apply_leave_exclusions,
-                                 groups, target, read_only=True)
+    leave_checked = True
+    warnings = []
+    try:
+        filtered_groups, excluded, _ = _step('confirmed_leave_read', apply_leave_exclusions,
+                                            groups, target, read_only=True)
+        groups = filtered_groups
+    except Exception as exc:
+        # This scope reads only the optional judge-leave tables. A missing table
+        # must not be confused with an empty, successfully checked exclusion list.
+        if getattr(exc, 'pgcode', None) != '42P01':
+            raise
+        leave_checked = False
+        excluded = []
+        warnings.append('Judge-leave verification unavailable: the optional leave tables are missing. '
+                        'The list below is unfiltered; confirm judge leave in the office before acting.')
     # Use the bot's floor/room/judge formatter; omit optional task/client enrichment.
     cause_text, total = _step('cause_list_format', build_floor_wise_cause_list, groups, {}, {})
     lines = [
@@ -43,19 +56,24 @@ def build_court_report(kind):
         from services.staff_motivation_service import daily_quote
         lines.append(plan.heading)
         lines.extend(['Evening reflection:', daily_quote(today, 'evening')])
+    if warnings:
+        lines.extend(['', 'WARNING: ' + warnings[0], ''])
     lines.extend([
         f'Hearings: {total}',
-        f'Confirmed judge-leave exclusions: {len(excluded)}',
+        (f'Confirmed judge-leave exclusions: {len(excluded)}' if leave_checked
+         else 'Judge-leave exclusions: NOT CHECKED'),
         f'Source: Advocate Diaries {source}',
         '',
-        cause_text if total else 'No hearings are listed for this court date after confirmed judge-leave exclusions.',
+        cause_text if total else ('No hearings are listed for this court date after confirmed judge-leave exclusions.'
+                                 if leave_checked else 'Advocate Diaries lists no hearings for this court date. Judge leave was not checked.'),
     ])
     if plan:
         lines.extend(['', 'Select and assign physical files using the existing Telegram evening dashboard.'])
     return {
         'ok': True, 'report': kind, 'court_date': target.isoformat(),
         'timezone': 'Asia/Kolkata', 'source': source, 'hearings': total,
-        'excluded_hearings': len(excluded),
+        'excluded_hearings': len(excluded) if leave_checked else None,
+        'judge_leave_checked': leave_checked, 'warnings': warnings,
         'generated_at': datetime.now(timezone.utc).isoformat(),
         'summary': '\n'.join(lines),
     }
