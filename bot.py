@@ -66,7 +66,7 @@ from commands.case_assignment import workcontrol, reconcileassignments
 from commands.case_intelligence import nextdateslist, physical_file_next_dates_job
 from commands.role_intelligence import mydashboard, officestatus, myfilesstatus, physical_file_status_callback
 from commands.hearing_readiness import readiness, morningreadiness
-from commands.heavy_dates import heavydates
+from commands.heavy_dates import heavydate, heavydates
 from commands.office_os import office, mywork_menu, files_menu, supervisor_menu, los_callback
 from commands.ai import build_ai_handler
 from commands.evening_dashboard import (
@@ -3712,6 +3712,7 @@ app.add_handler(hearing_completion_handler())
 app.add_handler(CallbackQueryHandler(live_hearing_callback, pattern=r"^lhc:"))
 app.add_handler(CommandHandler("tomorrowcause", tomorrowcause))
 app.add_handler(CommandHandler("heavydates", heavydates))
+app.add_handler(CommandHandler("heavydate", heavydate))
 app.add_handler(
     CommandHandler("explore", explore)
 )
