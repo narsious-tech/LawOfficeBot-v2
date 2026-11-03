@@ -61,26 +61,41 @@ def _clean(value: Any, fallback: str = "") -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip() or fallback
 
 
-def _purpose_key(value: Any) -> str:
+def _purpose_keys(value: Any) -> list[str]:
     text = _clean(value).casefold()
     if not text:
-        return "__missing__"
+        return []
     text = re.sub(r"^[\W_]*(?:for\s+)?", "", text)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    key = re.sub(r"\s+", " ", text).strip()
-    aliases = {
-        "arg": "arguments",
-        "args": "arguments",
-        "argument": "arguments",
-        "consd": "consideration",
-        "cons": "consideration",
-        "pre evd": "preliminary evidence",
-        "pre evidence": "preliminary evidence",
-        "preliminary evd": "preliminary evidence",
-        "p evd": "plaintiff evidence",
-        "p evidence": "plaintiff evidence",
-    }
-    return aliases.get(key, key) or "__missing__"
+    key = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text)).strip()
+    groups: list[str] = []
+
+    def add(group: str) -> None:
+        if group not in groups:
+            groups.append(group)
+
+    if re.search(r"\b(?:arg|args|argument|arguments)\b", key):
+        add("arguments")
+    if re.search(r"\b(?:cons|consd|consideration)\b", key):
+        add("consideration")
+    if re.search(r"\b(?:pre|preliminary)\s+(?:evd|evidence)\b", key):
+        add("preliminary evidence")
+    elif re.search(r"\b(?:pro|prosecution)\s+(?:evd|evidence)\b", key):
+        add("prosecution evidence")
+    elif re.search(r"\b(?:p\s+(?:evd|evidence)|pws|plaintiff\s+(?:evd|evidence|witness))\b", key):
+        add("plaintiff evidence")
+    if re.search(r"\b(?:d\s+(?:evd|evidence)|dws|defendant\s+(?:evd|evidence|witness))\b", key):
+        add("defendant evidence")
+    if re.search(r"\breply\b", key):
+        add("reply")
+    if re.search(r"\bnotice\b", key):
+        add("notice")
+    if re.search(r"\bappearance\b", key):
+        add("appearance")
+    if re.search(r"\bcws\b", key):
+        add("cws")
+    if re.search(r"\bwdn\b", key):
+        add("wdn")
+    return groups or ([key] if key else [])
 
 
 def _purpose_label(key: str, labels: Counter[str]) -> str:
@@ -89,8 +104,31 @@ def _purpose_label(key: str, labels: Counter[str]) -> str:
         "consideration": "Consideration",
         "preliminary evidence": "Preliminary evidence",
         "plaintiff evidence": "Plaintiff evidence",
+        "prosecution evidence": "Prosecution evidence",
+        "defendant evidence": "Defendant evidence",
+        "reply": "Reply",
+        "notice": "Notice",
+        "appearance": "Appearance",
+        "cws": "CWS",
+        "wdn": "WDN",
     }
     return preferred.get(key) or labels.most_common(1)[0][0]
+
+
+def _title_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _number_parts(value: str) -> list[str]:
+    return [part for part in re.split(r"[^a-z0-9]+", value.casefold()) if part]
+
+
+def _numbers_are_aliases(left: str, right: str) -> bool:
+    a, b = _number_parts(left), _number_parts(right)
+    if a == b:
+        return True
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    return len(short) >= 3 and any(part.isalpha() for part in short) and long[-len(short):] == short
 
 
 def _row_value(row: dict[str, Any], *names: str) -> Any:
@@ -129,28 +167,41 @@ def analyse_heavy_dates(
             "case_title": _clean(_row_value(raw, "case_title", "title"), "Title not recorded"),
             "purpose": raw_purpose or "Purpose not recorded",
         }
-        case["purpose_key"] = _purpose_key(raw_purpose)
+        case["purpose_keys"] = _purpose_keys(raw_purpose)
         identity = re.sub(r"\s+", "", number).casefold()
         if identity == "numbernotrecorded":
             identity = "title:" + case["case_title"].casefold()
-        existing = by_date[hearing_date].get(identity)
+        existing_key = identity if identity in by_date[hearing_date] else None
+        if existing_key is None:
+            title_key = _title_key(case["case_title"])
+            if title_key and title_key != "titlenotrecorded":
+                for candidate_key, candidate in by_date[hearing_date].items():
+                    if (
+                        _title_key(candidate["case_title"]) == title_key
+                        and _numbers_are_aliases(candidate["case_number"], number)
+                    ):
+                        existing_key = candidate_key
+                        break
+        existing = by_date[hearing_date].get(existing_key) if existing_key else None
         if not existing:
             by_date[hearing_date][identity] = case
         else:
             # Prefer the richer copy when Office OS contains duplicate case rows.
-            if existing["purpose_key"] == "__missing__" and case["purpose_key"] != "__missing__":
+            if not existing["purpose_keys"] and case["purpose_keys"]:
                 existing["purpose"] = case["purpose"]
-                existing["purpose_key"] = case["purpose_key"]
+                existing["purpose_keys"] = case["purpose_keys"]
             if existing["case_title"] == "Title not recorded" and case["case_title"] != "Title not recorded":
                 existing["case_title"] = case["case_title"]
+            if len(_number_parts(case["case_number"])) > len(_number_parts(existing["case_number"])):
+                existing["case_number"] = case["case_number"]
 
     result: list[dict[str, Any]] = []
     for hearing_date, case_map in by_date.items():
         cases = list(case_map.values())
         purpose_counts = Counter(
-            case["purpose_key"] for case in cases if case["purpose_key"] != "__missing__"
+            key for case in cases for key in case["purpose_keys"]
         )
-        missing_purpose = sum(case["purpose_key"] == "__missing__" for case in cases)
+        missing_purpose = sum(not case["purpose_keys"] for case in cases)
         largest_cluster = max(purpose_counts.values(), default=0)
         if len(cases) < minimum_matters and largest_cluster < minimum_same_purpose:
             continue
@@ -158,9 +209,9 @@ def analyse_heavy_dates(
         purpose_labels: dict[str, Counter[str]] = defaultdict(Counter)
         purpose_cases: dict[str, list[dict[str, str]]] = defaultdict(list)
         for case in cases:
-            if case["purpose_key"] != "__missing__":
-                purpose_labels[case["purpose_key"]][case["purpose"]] += 1
-                purpose_cases[case["purpose_key"]].append(case)
+            for key in case["purpose_keys"]:
+                purpose_labels[key][case["purpose"]] += 1
+                purpose_cases[key].append(case)
 
         clusters = []
         for key, count in purpose_counts.most_common():
