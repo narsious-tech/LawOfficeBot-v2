@@ -144,6 +144,9 @@ def classify_owner_command(text: str) -> tuple[str, str]:
         return "EVENING_DASHBOARD", ""
     if upper in {"HEAVY", "HEAVY DATES", "HEARING LOAD", "BUSY DATES"}:
         return "HEAVY_DATES", ""
+    heavy_detail = re.fullmatch(r"HEAVY DATE\s+(.+)", upper)
+    if heavy_detail:
+        return "HEAVY_DATE", command[len("HEAVY DATE "):].strip()
     if upper in {"FILES", "PHYSICAL FILES", "SELECT FILES", "FILE SELECTION"}:
         return "FILES", ""
     if upper in {"FILES REVIEW", "REVIEW FILES", "REVIEW SELECTED"}:
@@ -186,6 +189,7 @@ def owner_menu() -> str:
         "• MORNING — owner morning dashboard\n"
         "• EVENING — tomorrow's hearing dashboard\n"
         "• HEAVY DATES — upcoming overloaded hearing dates\n"
+        "• HEAVY DATE DD-MM-YYYY — full details for one date\n"
         "• FILES — select physical files case-wise\n"
         "• LIVE — live-hearing status control\n"
         "• MESSAGE — choose one staff member\n"
@@ -793,8 +797,21 @@ def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
                 settings = heavy_date_settings()
                 items = get_heavy_dates(lookahead_days=settings["lookahead_days"])
                 reply = render_heavy_dates(
-                    items, lookahead_days=settings["lookahead_days"], limit=12,
+                    items, lookahead_days=settings["lookahead_days"],
                 )
+            elif action == "HEAVY_DATE":
+                from services.heavy_dates_service import (
+                    get_heavy_dates, parse_hearing_date, render_heavy_date_detail,
+                )
+
+                target = parse_hearing_date(argument)
+                if not target:
+                    reply = "❌ Invalid date. Send: HEAVY DATE DD-MM-YYYY"
+                else:
+                    days = max(45, (target - datetime.now(OFFICE_TZ).date()).days + 1)
+                    items = get_heavy_dates(lookahead_days=max(1, min(365, days)))
+                    entry = next((row for row in items if row["date"] == target), None)
+                    reply = render_heavy_date_detail(entry)
             elif action == "FILES":
                 from services.whatsapp_dashboard_service import file_selection_board
 

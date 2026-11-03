@@ -62,10 +62,35 @@ def _clean(value: Any, fallback: str = "") -> str:
 
 
 def _purpose_key(value: Any) -> str:
-    text = _clean(value, "Purpose not recorded").casefold()
+    text = _clean(value).casefold()
+    if not text:
+        return "__missing__"
     text = re.sub(r"^[\W_]*(?:for\s+)?", "", text)
     text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip() or "purpose not recorded"
+    key = re.sub(r"\s+", " ", text).strip()
+    aliases = {
+        "arg": "arguments",
+        "args": "arguments",
+        "argument": "arguments",
+        "consd": "consideration",
+        "cons": "consideration",
+        "pre evd": "preliminary evidence",
+        "pre evidence": "preliminary evidence",
+        "preliminary evd": "preliminary evidence",
+        "p evd": "plaintiff evidence",
+        "p evidence": "plaintiff evidence",
+    }
+    return aliases.get(key, key) or "__missing__"
+
+
+def _purpose_label(key: str, labels: Counter[str]) -> str:
+    preferred = {
+        "arguments": "Arguments",
+        "consideration": "Consideration",
+        "preliminary evidence": "Preliminary evidence",
+        "plaintiff evidence": "Plaintiff evidence",
+    }
+    return preferred.get(key) or labels.most_common(1)[0][0]
 
 
 def _row_value(row: dict[str, Any], *names: str) -> Any:
@@ -86,7 +111,7 @@ def analyse_heavy_dates(
     very_heavy_purpose: int,
 ) -> list[dict[str, Any]]:
     end_date = start_date + timedelta(days=lookahead_days)
-    by_date: dict[date, list[dict[str, str]]] = defaultdict(list)
+    by_date: dict[date, dict[str, dict[str, str]]] = defaultdict(dict)
 
     for raw in rows:
         status = _clean(_row_value(raw, "status", "case_status")).upper()
@@ -97,17 +122,35 @@ def analyse_heavy_dates(
         )
         if not hearing_date or hearing_date < start_date or hearing_date > end_date:
             continue
+        number = _clean(_row_value(raw, "case_number", "case_id"), "Number not recorded")
+        raw_purpose = _clean(_row_value(raw, "next_purpose", "purpose"))
         case = {
-            "case_number": _clean(_row_value(raw, "case_number", "case_id"), "Number not recorded"),
+            "case_number": number,
             "case_title": _clean(_row_value(raw, "case_title", "title"), "Title not recorded"),
-            "purpose": _clean(_row_value(raw, "next_purpose", "purpose"), "Purpose not recorded"),
+            "purpose": raw_purpose or "Purpose not recorded",
         }
-        case["purpose_key"] = _purpose_key(case["purpose"])
-        by_date[hearing_date].append(case)
+        case["purpose_key"] = _purpose_key(raw_purpose)
+        identity = re.sub(r"\s+", "", number).casefold()
+        if identity == "numbernotrecorded":
+            identity = "title:" + case["case_title"].casefold()
+        existing = by_date[hearing_date].get(identity)
+        if not existing:
+            by_date[hearing_date][identity] = case
+        else:
+            # Prefer the richer copy when Office OS contains duplicate case rows.
+            if existing["purpose_key"] == "__missing__" and case["purpose_key"] != "__missing__":
+                existing["purpose"] = case["purpose"]
+                existing["purpose_key"] = case["purpose_key"]
+            if existing["case_title"] == "Title not recorded" and case["case_title"] != "Title not recorded":
+                existing["case_title"] = case["case_title"]
 
     result: list[dict[str, Any]] = []
-    for hearing_date, cases in by_date.items():
-        purpose_counts = Counter(case["purpose_key"] for case in cases)
+    for hearing_date, case_map in by_date.items():
+        cases = list(case_map.values())
+        purpose_counts = Counter(
+            case["purpose_key"] for case in cases if case["purpose_key"] != "__missing__"
+        )
+        missing_purpose = sum(case["purpose_key"] == "__missing__" for case in cases)
         largest_cluster = max(purpose_counts.values(), default=0)
         if len(cases) < minimum_matters and largest_cluster < minimum_same_purpose:
             continue
@@ -115,12 +158,13 @@ def analyse_heavy_dates(
         purpose_labels: dict[str, Counter[str]] = defaultdict(Counter)
         purpose_cases: dict[str, list[dict[str, str]]] = defaultdict(list)
         for case in cases:
-            purpose_labels[case["purpose_key"]][case["purpose"]] += 1
-            purpose_cases[case["purpose_key"]].append(case)
+            if case["purpose_key"] != "__missing__":
+                purpose_labels[case["purpose_key"]][case["purpose"]] += 1
+                purpose_cases[case["purpose_key"]].append(case)
 
         clusters = []
         for key, count in purpose_counts.most_common():
-            label = purpose_labels[key].most_common(1)[0][0]
+            label = _purpose_label(key, purpose_labels[key])
             clusters.append({
                 "purpose": label,
                 "count": count,
@@ -134,8 +178,10 @@ def analyse_heavy_dates(
             "date": hearing_date,
             "total": len(cases),
             "largest_purpose_cluster": largest_cluster,
+            "missing_purpose": missing_purpose,
             "severity": severity,
             "purpose_clusters": clusters,
+            "cases": sorted(cases, key=lambda item: item["case_number"].casefold()),
         })
 
     return sorted(result, key=lambda item: (item["date"], -item["total"]))
@@ -178,8 +224,7 @@ def render_heavy_dates(
         for item in visible:
             icon = "🔴" if item["severity"] == "VERY_HEAVY" else "🟠"
             lines.append(
-                f"{icon} {item['date'].strftime('%d %b')} · {item['total']} matters · "
-                f"largest same-purpose group {item['largest_purpose_cluster']}"
+                f"{icon} {item['date'].strftime('%d %b')} · {item['total']} matters"
             )
         return "\n".join(lines)
 
@@ -198,22 +243,50 @@ def render_heavy_dates(
 
     for item in visible:
         icon = "🔴" if item["severity"] == "VERY_HEAVY" else "🟠"
-        lines.extend([
-            f"{icon} {item['date'].strftime('%A, %d %B %Y')}",
-            f"⚖️ {item['total']} matters",
-        ])
         repeated = [cluster for cluster in item["purpose_clusters"] if cluster["count"] >= 2]
-        for cluster in repeated[:5]:
-            numbers = ", ".join(case["case_number"] for case in cluster["cases"][:6])
-            if len(cluster["cases"]) > 6:
-                numbers += f", +{len(cluster['cases']) - 6} more"
-            lines.append(f"• {cluster['purpose']} — {cluster['count']} ({numbers})")
-        unclustered = item["total"] - sum(cluster["count"] for cluster in repeated)
-        if unclustered:
-            lines.append(f"• Other purposes — {unclustered}")
-        lines.append("")
+        cluster_text = ", ".join(
+            f"{cluster['purpose']} {cluster['count']}" for cluster in repeated[:3]
+        )
+        suffix = f" · {cluster_text}" if cluster_text else ""
+        missing = item.get("missing_purpose", 0)
+        missing_text = f" · ⚠️ {missing} purpose missing" if missing else ""
+        lines.append(
+            f"{icon} {item['date'].strftime('%a, %d %b')} — {item['total']} matters"
+            f"{suffix}{missing_text}"
+        )
     if limit and len(items) > limit:
         lines.append(f"…and {len(items) - limit} more heavy date(s).")
-    lines.append("Plan drafting, file preparation and staff allocation before these dates.")
+    lines.extend([
+        "",
+        "Details: /heavydate DD-MM-YYYY",
+        "Plan drafting, file preparation and staff allocation before these dates.",
+    ])
     return "\n".join(lines).strip()
+
+
+def render_heavy_date_detail(item: dict[str, Any] | None) -> str:
+    if not item:
+        return "❌ No heavy-date entry was found for that date."
+    icon = "🔴" if item["severity"] == "VERY_HEAVY" else "🟠"
+    lines = [
+        f"{icon} HEARING LOAD — {item['date'].strftime('%A, %d %B %Y')}",
+        f"⚖️ Unique matters: {item['total']}",
+        "",
+    ]
+    repeated = [cluster for cluster in item["purpose_clusters"] if cluster["count"] >= 2]
+    if repeated:
+        lines.append("🎯 REPEATED PURPOSES")
+        for cluster in repeated:
+            lines.append(f"• {cluster['purpose']} — {cluster['count']}")
+        lines.append("")
+    missing = item.get("missing_purpose", 0)
+    if missing:
+        lines.extend([f"⚠️ Purpose missing in {missing} matter(s)", ""])
+    lines.append("📋 CASES")
+    for index, case in enumerate(item.get("cases") or [], 1):
+        lines.extend([
+            f"{index}. {case['case_number']} — {case['purpose']}",
+            f"   {case['case_title']}",
+        ])
+    return "\n".join(lines)
 
