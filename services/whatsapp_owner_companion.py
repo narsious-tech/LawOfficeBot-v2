@@ -142,6 +142,8 @@ def classify_owner_command(text: str) -> tuple[str, str]:
         return "MORNING_DASHBOARD", ""
     if upper in {"EVENING", "EVENING DASHBOARD", "DAY CLOSING"}:
         return "EVENING_DASHBOARD", ""
+    if upper in {"HEAVY", "HEAVY DATES", "HEARING LOAD", "BUSY DATES"}:
+        return "HEAVY_DATES", ""
     if upper in {"FILES", "PHYSICAL FILES", "SELECT FILES", "FILE SELECTION"}:
         return "FILES", ""
     if upper in {"FILES REVIEW", "REVIEW FILES", "REVIEW SELECTED"}:
@@ -183,6 +185,7 @@ def owner_menu() -> str:
         "• OVERVIEW — office totals\n"
         "• MORNING — owner morning dashboard\n"
         "• EVENING — tomorrow's hearing dashboard\n"
+        "• HEAVY DATES — upcoming overloaded hearing dates\n"
         "• FILES — select physical files case-wise\n"
         "• LIVE — live-hearing status control\n"
         "• MESSAGE — choose one staff member\n"
@@ -782,6 +785,16 @@ def handle_owner_inbound(item: dict[str, Any]) -> dict[str, Any]:
                     "is_owner": True, "phone": phone, "reply": reply,
                     "buttons": [("owner_files_start", "Select Files")],
                 }
+            elif action == "HEAVY_DATES":
+                from services.heavy_dates_service import (
+                    get_heavy_dates, heavy_date_settings, render_heavy_dates,
+                )
+
+                settings = heavy_date_settings()
+                items = get_heavy_dates(lookahead_days=settings["lookahead_days"])
+                reply = render_heavy_dates(
+                    items, lookahead_days=settings["lookahead_days"], limit=12,
+                )
             elif action == "FILES":
                 from services.whatsapp_dashboard_service import file_selection_board
 
