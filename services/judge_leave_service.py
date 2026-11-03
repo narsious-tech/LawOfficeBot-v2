@@ -239,14 +239,11 @@ def decide_batch(batch_id: int, source_identity: str, confirm: bool) -> dict[str
         conn.close()
 
 
-def confirmed_leave_entries(target_date: date, *, read_only: bool = False) -> list[dict[str, Any]]:
+def confirmed_leave_entries(target_date: date) -> list[dict[str, Any]]:
     conn = psycopg2.connect(DATABASE_URL, connect_timeout=15)
     try:
-        if read_only:
-            conn.set_session(readonly=True)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if not read_only:
-                ensure_schema(cur)
+            ensure_schema(cur)
             cur.execute("""
                 SELECT DISTINCT ON (e.judge_key,e.court_name) e.*
                 FROM judge_leave_entries e
@@ -262,9 +259,8 @@ def confirmed_leave_entries(target_date: date, *, read_only: bool = False) -> li
 def apply_leave_exclusions(
     groups: list[dict[str, Any]], target_date: date,
     entries: list[dict[str, Any]] | None = None,
-    *, read_only: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    entries = confirmed_leave_entries(target_date, read_only=read_only) if entries is None else entries
+    entries = confirmed_leave_entries(target_date) if entries is None else entries
     keys = {str(entry.get("judge_key") or "") for entry in entries}
     kept: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
@@ -303,26 +299,9 @@ def leave_alert_text(target_date: date) -> str | None:
 
 
 def holiday_name(target_date: date) -> str | None:
-    overrides = os.getenv("COURT_HOLIDAY_OVERRIDES", "").strip()
-    if overrides:
-        try:
-            value = json.loads(overrides).get(target_date.isoformat())
-            if value:
-                return str(value).strip()
-        except (ValueError, TypeError, AttributeError):
-            pass
-    try:
-        import holidays
+    from services.office_calendar_service import court_holiday_name
 
-        calendar = holidays.country_holidays(
-            "IN",
-            subdiv=os.getenv("COURT_HOLIDAY_SUBDIV", "PB").strip() or "PB",
-            years=[target_date.year],
-            language="en_IN",
-        )
-        return str(calendar.get(target_date) or "").strip() or None
-    except Exception:
-        return None
+    return court_holiday_name(target_date)
 
 
 def holiday_greeting(target_date: date, active_case_count: int) -> str | None:

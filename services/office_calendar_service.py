@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -9,6 +11,67 @@ class EveningPlan:
     target_date: date
     mode: str
     heading: str
+
+
+# Official 2026 Subordinate Courts calendar plus the two local holidays
+# declared for the Ludhiana Sessions Division. General holiday libraries do
+# not contain Sessions Division local holidays and differ on some court dates.
+_DISTRICT_COURT_HOLIDAYS_2026 = {
+    date(2026, 1, 1): "New Year Day",
+    date(2026, 1, 26): "Republic Day",
+    date(2026, 2, 1): "Guru Ravi Dass Jayanti",
+    date(2026, 2, 15): "Maha Shivratri",
+    date(2026, 3, 3): "Holi",
+    date(2026, 3, 4): "Hola",
+    date(2026, 3, 21): "Id-ul-Fitr",
+    date(2026, 3, 26): "Ram Navami",
+    date(2026, 3, 31): "Mahavir Jayanti",
+    date(2026, 4, 14): "Baisakhi / Dr. Ambedkar's Jayanti",
+    date(2026, 5, 28): "Id-ul-Zuha (Bakrid)",
+    date(2026, 6, 18): "Martyrdom Day of Sri Guru Arjan Dev Ji",
+    date(2026, 8, 15): "Independence Day",
+    date(2026, 9, 4): "Sri Krishan Janmashtami",
+    date(2026, 10, 2): "Mahatma Gandhi's Jayanti",
+    date(2026, 10, 20): "Dussehra",
+    date(2026, 10, 26): "Maharishi Valmiki Jayanti",
+    date(2026, 10, 29): "Karwa Chauth (Ludhiana local court holiday)",
+    date(2026, 11, 7): "Chhoti Diwali (Ludhiana local court holiday)",
+    date(2026, 11, 8): "Diwali",
+    date(2026, 11, 9): "Vishwakarma Day",
+    date(2026, 11, 24): "Birthday of Sri Guru Nanak Dev Ji",
+    date(2026, 12, 14): "Martyrdom Day of Sri Guru Teg Bahadur Ji",
+    date(2026, 12, 25): "Christmas",
+    **{date(2026, 12, day): "Winter Spell" for day in range(26, 32)},
+}
+
+
+def court_holiday_name(day: date) -> str | None:
+    """Return the court holiday, including Ludhiana local declarations."""
+    overrides = os.getenv("COURT_HOLIDAY_OVERRIDES", "").strip()
+    if overrides:
+        try:
+            value = json.loads(overrides).get(day.isoformat())
+            if value:
+                return str(value).strip()
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+    official = _DISTRICT_COURT_HOLIDAYS_2026.get(day)
+    if official:
+        return official
+
+    try:
+        import holidays
+
+        calendar = holidays.country_holidays(
+            "IN",
+            subdiv=os.getenv("COURT_HOLIDAY_SUBDIV", "PB").strip() or "PB",
+            years=[day.year],
+            language="en_IN",
+        )
+        return str(calendar.get(day) or "").strip() or None
+    except Exception:
+        return None
 
 
 def saturday_number(day: date) -> int:
@@ -24,6 +87,8 @@ def is_working_saturday(day: date) -> bool:
 
 
 def is_morning_office_open(day: date) -> bool:
+    if court_holiday_name(day):
+        return False
     if day.weekday() == 6:
         return False
     if day.weekday() == 5:
@@ -82,6 +147,15 @@ def manual_evening_plan(day: date) -> EveningPlan:
 
 
 def morning_closure_message(day: date) -> str:
+    holiday = court_holiday_name(day)
+    if holiday:
+        return (
+            "🎉 COURT HOLIDAY\n\n"
+            f"{holiday}\n"
+            f"📅 {day:%d-%m-%Y}\n\n"
+            "District Court morning operations and the routine cause-list board are closed.\n"
+            "Any specially assigned or urgent matter must still be checked separately."
+        )
     if day.weekday() == 6:
         monday = day + timedelta(days=1)
         return (
