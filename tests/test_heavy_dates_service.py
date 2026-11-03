@@ -88,6 +88,33 @@ class HeavyDatesServiceTests(unittest.TestCase):
         self.assertIn("Evidence 8", text)
         self.assertNotIn("CS/1/2026", text)
 
+    def test_prefixed_alias_number_with_same_title_is_one_matter(self):
+        rows = [
+            {"case_number": "DC/36/EA/59/2026", "case_title": "Anil Singhania VS Star Health", "next_hearing": "04-11-2026", "next_purpose": "Appearance", "status": "OPEN"},
+            {"case_number": "EA/59/2026", "case_title": "Anil Singhania VS Star Health", "next_hearing": "04-11-2026", "next_purpose": "", "status": "OPEN"},
+            *[
+                {"case_number": f"CS/{i}/2026", "case_title": f"Case {i}", "next_hearing": "04-11-2026", "next_purpose": "Reply", "status": "OPEN"}
+                for i in range(1, 8)
+            ],
+        ]
+        items = analyse_heavy_dates(rows, start_date=date(2026, 11, 3), **SETTINGS)
+        self.assertEqual(items[0]["total"], 8)
+        self.assertEqual(
+            sum(case["case_number"].endswith("EA/59/2026") for case in items[0]["cases"]),
+            1,
+        )
+
+    def test_combined_purpose_contributes_to_each_work_group(self):
+        rows = [
+            {"case_number": "CS/1/2026", "next_hearing": "04-11-2026", "next_purpose": "Consd 39R1&2", "status": "OPEN"},
+            {"case_number": "CS/2/2026", "next_hearing": "04-11-2026", "next_purpose": "PWS + consd", "status": "OPEN"},
+            {"case_number": "CS/3/2026", "next_hearing": "04-11-2026", "next_purpose": "Consd", "status": "OPEN"},
+        ]
+        items = analyse_heavy_dates(rows, start_date=date(2026, 11, 3), **SETTINGS)
+        counts = {cluster["purpose"]: cluster["count"] for cluster in items[0]["purpose_clusters"]}
+        self.assertEqual(counts["Consideration"], 3)
+        self.assertEqual(counts["Plaintiff evidence"], 1)
+
 
 
 if __name__ == "__main__":
