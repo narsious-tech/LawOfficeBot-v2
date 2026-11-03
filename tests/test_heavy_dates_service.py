@@ -1,7 +1,10 @@
 import unittest
 from datetime import date
 
-from services.heavy_dates_service import analyse_heavy_dates, parse_hearing_date, render_heavy_dates
+from services.heavy_dates_service import (
+    analyse_heavy_dates, parse_hearing_date, render_heavy_date_detail,
+    render_heavy_dates,
+)
 
 
 SETTINGS = {
@@ -52,9 +55,38 @@ class HeavyDatesServiceTests(unittest.TestCase):
             for i in range(1, 4)
         ]
         items = analyse_heavy_dates(rows, start_date=date(2026, 11, 3), **SETTINGS)
-        text = render_heavy_dates(items, lookahead_days=45)
+        text = render_heavy_date_detail(items[0])
         self.assertIn("Evidence — 3", text)
         self.assertIn("CS/1/2026", text)
+
+    def test_duplicate_case_rows_are_counted_once(self):
+        rows = [
+            {"case_number": "CRM/1790/2026", "next_hearing": "2026-11-06", "next_purpose": "", "status": "OPEN"},
+            {"case_number": "CRM/1790/2026", "next_hearing": "06-11-2026", "next_purpose": "Arguments", "status": "OPEN"},
+            {"case_number": "CS/1/2026", "next_hearing": "06-11-2026", "next_purpose": "Arguments", "status": "OPEN"},
+            {"case_number": "CS/2/2026", "next_hearing": "06-11-2026", "next_purpose": "Arg", "status": "OPEN"},
+        ]
+        items = analyse_heavy_dates(rows, start_date=date(2026, 11, 3), **SETTINGS)
+        self.assertEqual(items[0]["total"], 3)
+        self.assertEqual(items[0]["largest_purpose_cluster"], 3)
+
+    def test_missing_purpose_is_warning_not_shared_purpose(self):
+        rows = [
+            {"case_number": f"CS/{i}/2026", "next_hearing": "2026-11-07", "next_purpose": "", "status": "OPEN"}
+            for i in range(1, 4)
+        ]
+        items = analyse_heavy_dates(rows, start_date=date(2026, 11, 3), **SETTINGS)
+        self.assertEqual(items, [])
+
+    def test_compact_report_does_not_list_every_case(self):
+        rows = [
+            {"case_number": f"CS/{i}/2026", "next_hearing": "2026-11-15", "next_purpose": "Evidence", "status": "OPEN"}
+            for i in range(1, 9)
+        ]
+        items = analyse_heavy_dates(rows, start_date=date(2026, 11, 3), **SETTINGS)
+        text = render_heavy_dates(items, lookahead_days=45)
+        self.assertIn("Evidence 8", text)
+        self.assertNotIn("CS/1/2026", text)
 
 
 
