@@ -43,8 +43,9 @@ attendance_app = Flask(
     template_folder="templates"
 )
 
-from services.ios_office_dashboard import register_ios_office_dashboard
-register_ios_office_dashboard(attendance_app)
+from services.ios_dashboard_api import blueprint as ios_dashboard_blueprint
+
+attendance_app.register_blueprint(ios_dashboard_blueprint)
 
 @attendance_app.get("/health")
 def health():
