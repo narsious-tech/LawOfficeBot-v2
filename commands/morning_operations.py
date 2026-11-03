@@ -8,6 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from commands.dashboard import fetch_advocate_diaries_cause_groups, normalize_space
+from services.office_calendar_service import court_holiday_name, is_morning_office_open
 
 IST = ZoneInfo("Asia/Kolkata")
 MESSAGE_LIMIT = 3800
@@ -152,6 +153,9 @@ def build_detail_chunks(groups, display_date):
             running += 1
         blocks.append("\n".join(lines).rstrip())
 
+    if not blocks:
+        return []
+
     header = f"⚖️ FLOOR-WISE CAUSE LIST\n📅 {display_date}"
     chunks = []
     current = header
@@ -178,6 +182,15 @@ async def publish_morning_operations(context, force=False):
     if not force and context.application.bot_data.get(sent_key) == date_key:
         return "duplicate"
 
+    if not is_morning_office_open(now.date()):
+        context.application.bot_data[sent_key] = date_key
+        holiday = court_holiday_name(now.date())
+        print(
+            "MORNING OPERATIONS SKIPPED: "
+            f"date={date_key}, reason={holiday or 'office calendar closure'}"
+        )
+        return "holiday" if holiday else "closed"
+
     groups, source = await asyncio.to_thread(fetch_advocate_diaries_cause_groups, now.date())
     groups = _usable_groups(groups)
     total = sum(len(group["cases"]) for group in groups)
@@ -199,9 +212,34 @@ async def publish_morning_operations(context, force=False):
         source = f"Live Hearing Mirror ({live_source})"
         live_count = len(live_rows)
 
+    leave_excluded = []
+    try:
+        from services.judge_leave_service import apply_leave_exclusions, normalize
+
+        groups, leave_excluded, leave_entries = await asyncio.to_thread(
+            apply_leave_exclusions, groups, now.date()
+        )
+        if leave_entries:
+            leave_keys = {str(entry.get("judge_key") or "") for entry in leave_entries}
+            live_rows = [
+                row for row in live_rows
+                if normalize(row.get("judge_name")) not in leave_keys
+            ]
+            live_count = len(live_rows)
+            source = f"{source} · Judge-leave exclusions applied"
+        total = sum(len(group.get("cases") or []) for group in groups)
+    except Exception as exc:
+        print(f"MORNING JUDGE-LEAVE FILTER FAILED: {type(exc).__name__}: {exc}")
+
+    summary = build_summary(groups, display_date, source, live_count)
+    if leave_excluded:
+        summary += (
+            "\n\n👨‍⚖️ Confirmed judge leave: "
+            f"{len(leave_excluded)} matter(s) excluded from operations."
+        )
     await context.bot.send_message(
         chat_id=int(group_id),
-        text=build_summary(groups, display_date, source, live_count),
+        text=summary,
     )
     for chunk in build_detail_chunks(groups, display_date):
         await context.bot.send_message(chat_id=int(group_id), text=chunk)
