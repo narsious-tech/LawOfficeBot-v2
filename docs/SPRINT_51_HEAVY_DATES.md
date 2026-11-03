@@ -21,6 +21,11 @@ The main report is a compact date heatmap. The detail command shows repeated
 purposes, case titles and case numbers. Duplicate Office OS case rows are counted
 once, and missing purposes are shown as a data-quality warning rather than being
 treated as a genuine shared purpose.
+
+Case-number aliases with the same case title (for example `EA/59/2026` and
+`DC/36/EA/59/2026`) are treated as one matter. Combined purposes are assigned
+to each relevant preparation group, so `PWS + consd` contributes to both
+Plaintiff evidence and Consideration.
 Closed and disposed cases are ignored. No external API call or paid WhatsApp template is used.
 
 ## Optional Railway variables
