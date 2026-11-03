@@ -26,7 +26,10 @@ Optional Telegram date override (today through the next seven days):
 
 ## Holiday greetings
 
-- India/Punjab public and festival dates are detected using the `holidays` package.
+- The official 2026 Subordinate Courts calendar is built in, including the
+  Ludhiana local holidays on 29 October (Karwa Chauth) and 7 November
+  (Chhoti Diwali). Other years fall back to the India/Punjab `holidays`
+  package and can be corrected with the override variable below.
 - `COURT_HOLIDAY_SUBDIV` defaults to `PB` and can be changed, for example to `CH`.
 - Annual court-calendar corrections can be supplied without a code change:
 
@@ -36,6 +39,10 @@ COURT_HOLIDAY_OVERRIDES={"2026-11-24":"Guru Nanak Jayanti","2026-12-25":"Christm
 
 - A greeting is sent only if the detected holiday also has 0, 1 or 2 active listed matters after confirmed judge-leave exclusions.
 - Three or more matters suppress the greeting, preventing the bot from treating a working court day as a holiday.
+- The 8:55 AM automatic court-operations publisher now stops on a confirmed
+  court holiday and no longer sends an empty Floor-wise Cause List header.
+- Confirmed judge-leave entries are applied to the automatic cause list and
+  live board before either is published.
 
 ## Deployment
 
