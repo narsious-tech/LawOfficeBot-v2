@@ -149,6 +149,10 @@ class OwnerTests(unittest.TestCase):
     def test_owner_work_page_command(self):
         self.assertEqual(classify_owner_command("WORK 2"), ("WORK", "2"))
 
+    def test_heavy_dates_command(self):
+        self.assertEqual(classify_owner_command("HEAVY DATES"), ("HEAVY_DATES", ""))
+        self.assertEqual(classify_owner_command("busy dates"), ("HEAVY_DATES", ""))
+
     def test_owner_attendance_command(self):
         self.assertEqual(
             classify_owner_command("TODAY ATTENDANCE"), ("ATTENDANCE", "")
