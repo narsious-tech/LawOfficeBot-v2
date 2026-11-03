@@ -2,6 +2,7 @@ import unittest
 from datetime import date
 
 from services.office_calendar_service import (
+    court_holiday_name,
     is_evening_office_open,
     is_full_day_saturday_holiday,
     is_morning_office_open,
@@ -12,6 +13,11 @@ from services.office_calendar_service import (
 
 
 class OfficeCalendarTests(unittest.TestCase):
+    def test_ludhiana_local_holiday_closes_morning_court_operations(self):
+        target = date(2026, 10, 29)
+        self.assertIn("Karwa Chauth", court_holiday_name(target))
+        self.assertFalse(is_morning_office_open(target))
+
     def test_saturday_rotation(self):
         self.assertTrue(is_working_saturday(date(2026, 7, 4)))
         self.assertTrue(is_full_day_saturday_holiday(date(2026, 7, 11)))
