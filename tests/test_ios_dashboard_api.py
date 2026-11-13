@@ -47,6 +47,23 @@ class IOSDashboardAPITests(unittest.TestCase):
     def tearDown(self):
         self.env.stop()
 
+    @patch("services.ios_dashboard_api.role_dashboard")
+    def test_legacy_summary_and_deadlines(self, dashboard):
+        dashboard.return_value = self.dashboard
+        payload, status = api.ios_office_status()
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['summary'], payload['display_text'])
+        self.assertIn('Pending: 5', payload['summary'])
+        payload, status = api.ios_deadlines()
+        self.assertEqual(status, 200)
+        self.assertIn('Overdue: 1', payload['summary'])
+
+    @patch("services.ios_dashboard_api.role_dashboard")
+    def test_legacy_token_name(self, dashboard):
+        dashboard.return_value = self.dashboard
+        with patch.dict(os.environ, {'IOS_DASHBOARD_TOKEN': '', 'IOS_OFFICE_DASHBOARD_TOKEN': 'private-test-token'}):
+            self.assertEqual(api.ios_office_status()[1], 200)
+
     def test_token_is_required(self):
         fake_request.headers = {}
         payload, status = api.ios_heavy_dates()
