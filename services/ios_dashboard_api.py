@@ -193,3 +193,25 @@ def ios_deadlines():
     return _shortcut_response(
         f"⏰ WORK DEADLINES\nDue today: {works.get('due_today', 0)}"
         f"\nOverdue: {works.get('overdue', 0)}\nPending: {works.get('pending', 0)}")
+
+
+@blueprint.get("/api/ios/today-hearings")
+def ios_today_hearings():
+    _, error = _authorize()
+    if error:
+        return error
+    try:
+        from commands.dashboard import fetch_advocate_diaries_cause_groups, build_floor_wise_cause_list
+        from services.judge_leave_service import apply_leave_exclusions
+        today = datetime.now(IST).date()
+        groups, source = fetch_advocate_diaries_cause_groups(today)
+        groups, excluded, _ = apply_leave_exclusions(groups, today)
+        text, total = build_floor_wise_cause_list(groups, {}, {})
+        if total == 0:
+            text = "No hearings listed for today after confirmed judge-leave exclusions."
+        if excluded:
+            text = f"Judge leave: {len(excluded)} matter(s) excluded.\n\n" + text
+        return _shortcut_response(f"📅 TODAY'S COURT HEARINGS — {today:%d-%m-%Y}\nSource: Advocate Diaries ({source})\n\n{text}")
+    except Exception:
+        logging.getLogger(__name__).exception("iOS today's hearings failed")
+        return jsonify({"error": "temporarily_unavailable", "summary": "Today's hearings could not be loaded. Please try again shortly.", "display_text": "Today's hearings could not be loaded. Please try again shortly."}), 503
