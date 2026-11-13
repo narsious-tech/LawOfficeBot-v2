@@ -1,0 +1,1 @@
+Replace services/ios_dashboard_api.py and redeploy. Existing shortcuts keep /api/ios/today-hearings and summary. Includes previous routes. Uses Advocate Diaries PDF/API cause list with confirmed judge-leave exclusions. Live service not tested locally. No variable changes required.
