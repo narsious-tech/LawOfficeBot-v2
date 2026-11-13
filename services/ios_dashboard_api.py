@@ -1,6 +1,7 @@
 """Authenticated, read-only API used by Ajay's iPhone Office Dashboard shortcut."""
 from __future__ import annotations
 
+import logging
 import hmac
 import os
 from datetime import datetime
@@ -17,7 +18,7 @@ OWNER_ROLES = {"admin", "owner", "principal"}
 
 
 def _authorize() -> tuple[dict | None, tuple | None]:
-    expected = os.getenv("IOS_DASHBOARD_TOKEN", "").strip()
+    expected = (os.getenv("IOS_DASHBOARD_TOKEN") or os.getenv("IOS_OFFICE_DASHBOARD_TOKEN") or "").strip()
     admin_id = os.getenv("ADMIN_USER_ID", "").strip()
     supplied = request.headers.get("Authorization", "")
     if not expected or not admin_id:
@@ -32,7 +33,7 @@ def _authorize() -> tuple[dict | None, tuple | None]:
             return None, (jsonify({"error": "forbidden"}), 403)
         return dashboard, None
     except Exception:
-        blueprint.logger.exception("iOS owner authorization failed")
+        logging.getLogger(__name__).exception("iOS owner authorization failed")
         return None, (jsonify({"error": "temporarily_unavailable"}), 503)
 
 
@@ -86,7 +87,7 @@ def ios_heavy_dates():
             ],
         }), 200
     except Exception:
-        blueprint.logger.exception("iOS heavy-date forecast failed")
+        logging.getLogger(__name__).exception("iOS heavy-date forecast failed")
         return jsonify({"error": "temporarily_unavailable"}), 503
 
 
@@ -122,6 +123,73 @@ def ios_heavy_date_detail():
             "display_text": render_heavy_date_detail(item),
         }), 200
     except Exception:
-        blueprint.logger.exception("iOS heavy-date detail failed")
+        logging.getLogger(__name__).exception("iOS heavy-date detail failed")
         return jsonify({"error": "temporarily_unavailable"}), 503
 
+
+
+# Compatibility routes for the existing Law Office Command Centre shortcuts.
+def _shortcut_response(text):
+    return jsonify({"summary": text, "display_text": text,
+                    "generated_at": datetime.now(IST).isoformat()}), 200
+
+
+def _office_text(dashboard):
+    works, files = dashboard["works"], dashboard["files"]
+    return (f"🏢 OFFICE STATUS\nStaff: {dashboard['profile'].get('staff_name', 'Ajay')}"
+            f"\n\n📝 WORK\nPending: {works.get('pending', 0)}"
+            f"\nDue today: {works.get('due_today', 0)}\nOverdue: {works.get('overdue', 0)}"
+            f"\n\n📁 FILES\nSelected/Pending: {files.get('pending', 0)}"
+            f"\nBrought: {files.get('brought', 0)}\nNot found: {files.get('not_found', 0)}"
+            f"\nNeeds attention: {files.get('attention', 0)}"
+            f"\n\nPending hearing updates: {dashboard.get('pending_updates', 0)}")
+
+
+@blueprint.get("/api/ios/office-dashboard")
+@blueprint.get("/api/ios/office-status")
+def ios_office_status():
+    dashboard, error = _authorize()
+    if error:
+        return error
+    return _shortcut_response(_office_text(dashboard))
+
+
+@blueprint.get("/api/ios/morning-dashboard")
+def ios_morning_dashboard():
+    _, error = _authorize()
+    if error:
+        return error
+    try:
+        from services.whatsapp_dashboard_service import owner_morning_dashboard
+        return _shortcut_response(owner_morning_dashboard())
+    except Exception:
+        logging.getLogger(__name__).exception("iOS morning dashboard failed")
+        return jsonify({"error": "temporarily_unavailable", "summary": "Morning dashboard temporarily unavailable."}), 503
+
+
+@blueprint.get("/api/ios/who-in-office")
+def ios_who_in_office():
+    _, error = _authorize()
+    if error:
+        return error
+    try:
+        from services.whatsapp_owner_companion import _owner_attendance
+        from services.role_intelligence_service import _connect
+        from psycopg2.extras import RealDictCursor
+        with _connect() as con, con.cursor(cursor_factory=RealDictCursor) as cur:
+            return _shortcut_response(_owner_attendance(cur))
+    except Exception:
+        logging.getLogger(__name__).exception("iOS attendance failed")
+        return jsonify({"error": "temporarily_unavailable", "summary": "Attendance temporarily unavailable."}), 503
+
+
+@blueprint.get("/api/ios/deadlines")
+@blueprint.get("/api/ios/work-deadlines")
+def ios_deadlines():
+    dashboard, error = _authorize()
+    if error:
+        return error
+    works = dashboard["works"]
+    return _shortcut_response(
+        f"⏰ WORK DEADLINES\nDue today: {works.get('due_today', 0)}"
+        f"\nOverdue: {works.get('overdue', 0)}\nPending: {works.get('pending', 0)}")
